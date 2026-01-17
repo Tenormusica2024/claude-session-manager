@@ -6,7 +6,29 @@
 # Session names database
 $NamesFile = "$env:USERPROFILE\.claude\session-names.json"
 $ProjectsDir = "$env:USERPROFILE\.claude\projects"
-$ClaudeExe = "$env:USERPROFILE\.bun\bin\claude.exe"
+
+# Auto-detect claude.exe location
+function Find-ClaudeExe {
+    $candidates = @(
+        "$env:USERPROFILE\.bun\bin\claude.exe",
+        "$env:USERPROFILE\.claude\local\claude.exe",
+        "$env:APPDATA\npm\claude.cmd",
+        "$env:LOCALAPPDATA\Programs\claude\claude.exe"
+    )
+    foreach ($path in $candidates) {
+        if (Test-Path $path) { return $path }
+    }
+    $whereResult = Get-Command "claude" -ErrorAction SilentlyContinue
+    if ($whereResult) { return $whereResult.Source }
+    return $null
+}
+
+$ClaudeExe = Find-ClaudeExe
+if (-not $ClaudeExe) {
+    Write-Host "ERROR: claude.exe not found. Please install Claude Code CLI first." -ForegroundColor Red
+    Write-Host "Install: npm install -g @anthropic-ai/claude-code" -ForegroundColor Yellow
+    exit 1
+}
 
 # Global: Track duplicate files for cleanup
 $script:duplicateFiles = @()
@@ -495,7 +517,6 @@ function Get-AITitlesParallel {
     
     if ($sessionInfos.Count -eq 0) { return @{} }
     
-    $ClaudeExe = "$env:USERPROFILE\.bun\bin\claude.exe"
     $TempDir = "$env:TEMP\claude-session-manager"
     if (-not (Test-Path $TempDir)) { New-Item -ItemType Directory -Path $TempDir -Force | Out-Null }
     $results = @{}
