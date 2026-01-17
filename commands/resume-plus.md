@@ -1,9 +1,11 @@
-Run the session manager PowerShell script using Bash tool.
+Run the session manager to list recent Claude Code sessions with AI-generated titles.
 
-Execute this exact command:
+Execute this command using the Bash tool:
 ```
-powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\session-manager.ps1"
+powershell -ExecutionPolicy Bypass -File "C:\Users\Tenormusica\.claude\session-manager-list.ps1"
 ```
 
-This is an interactive TUI - wait for user to select a session with arrow keys and press Enter.
-Do not interpret the output. Just run the command and let the user interact with it.
+After displaying the session list:
+1. Show the user the session list output
+2. Ask which session number they want to resume
+3. When user provides a number, run: `claude -r <session-id>` using the corresponding session ID from the list
