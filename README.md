@@ -36,11 +36,20 @@ Sessions with custom names are marked with `*`.
 
 ## Features
 
-### AI-Powered Summarization
-Press `S` to generate an AI summary of the selected session. The tool:
-1. Extracts user messages from the session
-2. Calls Claude to generate a 5-10 word summary
-3. Saves the summary to `~/.claude/session-names.json`
+### Auto-Summarization on Startup
+When you launch the tool, it automatically summarizes unnamed sessions:
+- Processes up to 10 unnamed sessions
+- Shows progress as each session is named
+- Use `-NoAutoSummary` to skip this step
+
+### Background Naming (Stop Hook)
+Sessions are automatically named when they end:
+- A Stop hook triggers after each Claude Code session
+- Names the session if it doesn't have one yet
+- No manual action required
+
+### Manual Re-summarization
+Press `S` to re-generate the AI summary for a session that has already been named.
 
 ### Manual Naming
 Press `N` to manually name a session. Useful when you want a specific name that the AI might not generate.
@@ -65,6 +74,28 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tenormusica2024/claude
 git clone https://github.com/tenormusica2024/claude-session-manager.git
 cd claude-session-manager
 Copy-Item session-manager.ps1 "$env:USERPROFILE\.claude\"
+```
+
+### Optional: Install Stop Hook (Background Naming)
+
+To enable automatic naming when sessions end:
+
+```powershell
+# Copy the hook script
+Copy-Item hooks\session-auto-namer.ps1 "$env:USERPROFILE\.claude\hooks\"
+```
+
+Then add this to your `~/.claude/settings.json` under the `hooks.Stop` array:
+
+```json
+{
+  "hooks": [
+    {
+      "type": "command",
+      "command": "powershell -ExecutionPolicy Bypass -File \"C:\\Users\\YOUR_USERNAME\\.claude\\hooks\\session-auto-namer.ps1\""
+    }
+  ]
+}
 ```
 
 ## Usage
