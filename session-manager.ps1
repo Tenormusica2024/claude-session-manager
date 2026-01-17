@@ -380,8 +380,13 @@ foreach ($projectDir in $projectDirs) {
                 }
             }
 
-            # Skip warmup and empty sessions
-            if ($defaultSummary -match "^(no content|Warmup|\(no content\))") {
+            # Skip warmup, empty, and AI prompt sessions
+            if ($defaultSummary -match "^(no content|Warmup|\(no content\)|Create a short title|このコーディングセッション)") {
+                continue
+            }
+
+            # Skip very small sessions (likely warmup or AI prompt sessions)
+            if ($jsonFile.Length -lt 5000) {
                 continue
             }
 
