@@ -419,52 +419,9 @@ else {
     Write-Host "Found $($sessions.Count) sessions" -ForegroundColor Green
 }
 
-# Auto-title unnamed sessions on startup using claude -p (Haiku)
-# Sessions with hook-generated names are already handled
-if (-not $NoAutoSummary -and $Command -eq "interactive") {
-    $unnamedSessions = @($sessions | Where-Object { -not $_.HasCustomName } | Select-Object -First 10)
-
-    if ($unnamedSessions.Count -gt 0) {
-        Write-Host ""
-        Write-Host "Summarizing $($unnamedSessions.Count) unnamed sessions with AI..." -ForegroundColor Yellow
-
-        $count = 0
-        $titled = 0
-        foreach ($session in $unnamedSessions) {
-            $count++
-            Write-Host "  [$count/$($unnamedSessions.Count)] Summarizing..." -ForegroundColor Gray -NoNewline
-
-            # Use claude -p with Haiku for summarization
-            $title = Get-AISummaryQuiet -sessionId $session.SessionId -filePath $session.FilePath
-
-            if ($title) {
-                # Save to names database
-                if (-not $sessionNames.sessions) {
-                    $sessionNames.sessions = @{}
-                }
-                $sessionNames.sessions.($session.SessionId) = @{
-                    name = $title
-                    updatedAt = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss")
-                    type = "ai-auto"
-                }
-
-                # Update session object
-                $session.Summary = $title
-                $session.HasCustomName = $true
-                $titled++
-                Write-Host " -> $title" -ForegroundColor Green
-            }
-            else {
-                Write-Host " (skipped)" -ForegroundColor DarkGray
-            }
-        }
-
-        # Save all names at once
-        Save-SessionNames -names $sessionNames
-
-        Write-Host "Titled $titled sessions with AI" -ForegroundColor Green
-    }
-}
+# Note: Auto-titling disabled for fast startup
+# Stop hook handles automatic naming after each response
+# Use S key to manually summarize unnamed sessions
 
 if ($Command -eq "interactive" -and $sessions.Count -gt 0) {
     $selectedIndex = 0
