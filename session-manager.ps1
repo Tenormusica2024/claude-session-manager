@@ -30,6 +30,24 @@ if (-not $ClaudeExe) {
     exit 1
 }
 
+# Test Claude CLI connectivity
+function Test-ClaudeConnection {
+    try {
+        $testResult = & $ClaudeExe --version 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            return $false
+        }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+$script:claudeConnected = Test-ClaudeConnection
+if (-not $script:claudeConnected) {
+    Write-Host "[WARN] Claude CLI not responding - AI features disabled" -ForegroundColor Yellow
+}
+
 # Global: Track duplicate files for cleanup
 $script:duplicateFiles = @()
 
@@ -532,6 +550,7 @@ function Get-AITitlesParallel {
     
     # Start all jobs in parallel
     $jobs = @()
+    $jobTimeout = 60  # seconds per job
     foreach ($info in $sessionInfos) {
         $contextFile = $contextFiles[$info.Index]
         $job = Start-Job -ScriptBlock {
@@ -574,10 +593,31 @@ $context"
         $jobs += $job
     }
     
-    # Wait for all jobs (max 10 minutes for up to 10 sessions)
-    $completed = $jobs | Wait-Job -Timeout 600
-    $rawResults = $completed | Receive-Job
-    $jobs | Remove-Job -Force
+    # Wait for all jobs with timeout (max 2 minutes total)
+    $timeoutSeconds = 120
+    $completed = $jobs | Wait-Job -Timeout $timeoutSeconds
+    
+    # Check for timed out jobs
+    $timedOut = $jobs | Where-Object { $_.State -eq 'Running' }
+    if ($timedOut.Count -gt 0) {
+        Write-Host "  [WARN] $($timedOut.Count) AI title job(s) timed out" -ForegroundColor Yellow
+        $timedOut | Stop-Job
+    }
+    
+    # Get results from completed jobs, handle errors
+    $rawResults = @()
+    foreach ($job in $completed) {
+        try {
+            if ($job.State -eq 'Completed') {
+                $rawResults += Receive-Job -Job $job -ErrorAction Stop
+            } elseif ($job.State -eq 'Failed') {
+                Write-Host "  [WARN] Job failed: $($job.ChildJobs[0].JobStateInfo.Reason.Message)" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "  [WARN] Error receiving job result: $_" -ForegroundColor Yellow
+        }
+    }
+    $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
     
     # Cleanup temp files
     foreach ($file in $contextFiles.Values) {
@@ -911,9 +951,14 @@ foreach ($session in $sessions) {
     }
 }
 
-if ($sessionsToValidate.Count -gt 0) {
+if ($sessionsToValidate.Count -gt 0 -and $script:claudeConnected) {
     Write-Host "  Validating $($sessionsToValidate.Count) session titles with AI..." -ForegroundColor Yellow
-    $aiResults = Get-AITitlesParallel -sessionInfos $sessionsToValidate
+    try {
+        $aiResults = Get-AITitlesParallel -sessionInfos $sessionsToValidate
+    } catch {
+        Write-Host "  [WARN] AI title generation failed: $_" -ForegroundColor Yellow
+        $aiResults = @{}
+    }
     $cacheUpdated = $false
     $skipIndices = @()
     foreach ($idx in $aiResults.Keys) {
