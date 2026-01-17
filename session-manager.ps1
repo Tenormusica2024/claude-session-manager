@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$Command = "interactive",
     [switch]$NoAutoSummary  # Skip auto-summarization
 )
@@ -102,7 +102,40 @@ function Get-QuickTitle {
             # File paths
             "^(C:\\|/Users/|~/|\./|http)",
             # Questions that are too generic
-            "^(確認していい|これでいい|どう思う|何か|ある？)$"
+            "^(確認していい|これでいい|どう思う|何か|ある？)$",
+            "^This session is being continued",
+            "^<user-prompt-submit-hook>",
+            "^Claude Auto-Mode loaded",
+            "^<system-reminder>",
+            "^(Summarize this|Create a short title)",
+            "^(Focus on the main|Output ONLY the title|The conversation is summarized)",
+            "^(Just output the summary|Example outputs:|Initial Context)",
+            "(Summarize this Claude Code session|5-10 words)",
+            "^\d+\] \[ERROR\]",
+            "^(Session content:|Session ID:)",
+            "\.com/[a-zA-Z]",
+            "/status/\d+",
+            "^claude\\\\projects\\\\",
+            "^jsonl",
+            "permission_mode",
+            "^@\{",
+            "^<task-notification>",
+            "^Initial Request:",
+            "^dev/tenormusica/",
+            "^com/[A-Za-z]",
+            "^<output",
+            "^The task was to",
+            "^output<",
+            "^md.+with a new",
+            "^</summary>",
+            "^Skill Definition:",
+            "_monitor_service$",
+            "^Read the output",
+            "claude\\\\skills\\\\",
+            "claude.skills.",
+            "^py ",
+            "^File Reading:",
+            "^- First attempted"
         )
 
         foreach ($pattern in $skipPatterns) {
@@ -359,6 +392,11 @@ foreach ($projectDir in $projectDirs) {
 
             $data = $firstLine | ConvertFrom-Json -ErrorAction Stop
 
+            # Skip compact_boundary files (session continuation markers)
+            if ($data.type -eq "system" -and $data.subtype -eq "compact_boundary") {
+                continue
+            }
+
             # Get session ID (from first line or filename for compacted sessions)
             $sessionId = $null
             if ($data.sessionId) {
@@ -368,18 +406,18 @@ foreach ($projectDir in $projectDirs) {
             }
             if (-not $sessionId) { continue }
 
-            # Get default summary using smart extraction (newest messages first, skip NG words)
-            $defaultSummary = Get-QuickTitle -filePath $jsonFile.FullName
-            if (-not $defaultSummary) {
-                # Fallback for compacted sessions with summary field
-                if ($data.summary) {
-                    $len = [Math]::Min(40, $data.summary.Length)
-                    $defaultSummary = $data.summary.Substring(0, $len)
-                } else {
-                    $defaultSummary = "(no content)"
-                }
+            # Get default summary - prefer compacted session summary first
+            $defaultSummary = $null
+            if ($data.type -eq "summary" -and $data.summary) {
+                $len = [Math]::Min(50, $data.summary.Length)
+                $defaultSummary = $data.summary.Substring(0, $len)
             }
-
+            if (-not $defaultSummary) {
+                $defaultSummary = Get-QuickTitle -filePath $jsonFile.FullName
+            }
+            if (-not $defaultSummary) {
+                $defaultSummary = "(no content)"
+            }
             # Skip warmup, empty, and AI prompt sessions
             if ($defaultSummary -match "^(no content|Warmup|\(no content\)|Create a short title|このコーディングセッション)") {
                 continue
@@ -387,6 +425,11 @@ foreach ($projectDir in $projectDirs) {
 
             # Skip very small sessions (likely warmup or AI prompt sessions)
             if ($jsonFile.Length -lt 5000) {
+                continue
+            }
+
+            # Skip AI skill session directories
+            if ($projectDir.Name -match "(ai-buzz-extractor|claude-skills-test|note-auto-article)") {
                 continue
             }
 
