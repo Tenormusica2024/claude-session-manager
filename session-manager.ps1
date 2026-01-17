@@ -59,18 +59,42 @@ function Get-SessionDisplayName {
 function Get-QuickTitle {
     param($filePath)
 
-    # Read file with encoding fallback
-    $allLines = $null
+    # Read first 30 lines (fast) + last 50 lines (need to seek)
+    $firstLines = @()
+    $lastLines = @()
+    
     try {
-        $allLines = Get-Content $filePath -Encoding UTF8 -ErrorAction Stop
+        # First 30 lines - fast
+        $firstLines = Get-Content $filePath -TotalCount 30 -Encoding UTF8 -ErrorAction Stop
+        
+        # Last 50 lines - use tail-like approach for large files
+        $fileInfo = Get-Item $filePath
+        if ($fileInfo.Length -gt 50KB) {
+            # File > 50KB: read last 50KB and extract lines
+            $stream = [System.IO.File]::Open($filePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            $seekPos = [Math]::Max(0, $stream.Length - 50KB)
+            $stream.Seek($seekPos, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+            $tailContent = $reader.ReadToEnd()
+            $reader.Close()
+            $stream.Close()
+            $lastLines = ($tailContent -split "`n") | Select-Object -Last 50
+        } else {
+            # Small file: read all and take last 50
+            $allContent = Get-Content $filePath -Encoding UTF8 -ErrorAction Stop
+            $lastLines = $allContent | Select-Object -Last 50
+        }
     }
     catch {
         try {
-            $allLines = Get-Content $filePath -ErrorAction SilentlyContinue
+            $firstLines = Get-Content $filePath -TotalCount 30 -ErrorAction SilentlyContinue
+            $lastLines = $firstLines
         }
         catch { return $null }
     }
-    if (-not $allLines -or $allLines.Count -eq 0) { return $null }
+    
+    if (-not $lastLines -or $lastLines.Count -eq 0) { return $null }
+    $allLines = $lastLines
 
     # Helper: Check if text is meaningful as a title
     function Test-MeaningfulTitle {
@@ -139,7 +163,15 @@ function Get-QuickTitle {
             "^Web Searches Performed:",
             "5-20",
             "^File Edits:",
-            "[\uFF61-\uFF9F]"
+            "[\uFF61-\uFF9F]",
+            "^S \{",
+            '^"session_id":',
+            "session_id",
+            "^セッション終了を検知",
+            "^Is this a meaningful session title",
+            "^Archive Creation:",
+            "^md``",
+            "^Error Encountered:"
         )
 
         foreach ($pattern in $skipPatterns) {
@@ -316,6 +348,127 @@ function Get-AISummaryQuiet {
     return $null
 }
 
+# AI-based title validation and generation (called during session list build)
+function Get-ValidatedTitle {
+    param($filePath, $quickTitle)
+    
+    $ClaudeExe = "$env:USERPROFILE\.bun\bin\claude.exe"
+    
+    # If no quick title, generate from scratch
+    if (-not $quickTitle -or $quickTitle -eq "(no content)") {
+        return Get-AIGeneratedTitle -filePath $filePath
+    }
+    
+    # Validate if quick title is meaningful using AI
+    $validationPrompt = "Is this a meaningful session title that describes what work was done? Answer only YES or NO. Title: `"$quickTitle`""
+    
+    try {
+        $env:ANTHROPIC_API_KEY = ""
+        $result = & $ClaudeExe -p $validationPrompt --model haiku --dangerously-skip-permissions 2>$null
+        $answer = ($result -split "`n")[0].Trim().ToUpper()
+        
+        if ($answer -match "^YES") {
+            return $quickTitle
+        }
+        
+        # Title rejected, generate new one
+        return Get-AIGeneratedTitle -filePath $filePath
+    }
+    catch {
+        # On error, return quick title as fallback
+        return $quickTitle
+    }
+}
+
+# Generate title from session content using AI (reads latest + first messages)
+function Get-AIGeneratedTitle {
+    param($filePath)
+    
+    $ClaudeExe = "$env:USERPROFILE\.bun\bin\claude.exe"
+    
+    # Extract messages from latest content (priority) + first content (fallback)
+    $userMessages = @()
+    
+    try {
+        $fileInfo = Get-Item $filePath
+        
+        # Read last 50KB for latest messages
+        if ($fileInfo.Length -gt 50KB) {
+            $stream = [System.IO.File]::Open($filePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            $seekPos = [Math]::Max(0, $stream.Length - 50KB)
+            $stream.Seek($seekPos, [System.IO.SeekOrigin]::Begin) | Out-Null
+            $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+            $tailContent = $reader.ReadToEnd()
+            $reader.Close()
+            $stream.Close()
+            $lastLines = ($tailContent -split "`n") | Select-Object -Last 30
+        } else {
+            $lastLines = Get-Content $filePath -Encoding UTF8 -ErrorAction SilentlyContinue | Select-Object -Last 30
+        }
+        
+        # Extract user messages from latest content
+        foreach ($line in $lastLines) {
+            try {
+                $entry = $line | ConvertFrom-Json -ErrorAction SilentlyContinue
+                if ($entry.message -and $entry.message.role -eq "user" -and $entry.message.content) {
+                    $content = $entry.message.content
+                    if ($content -is [string] -and $content.Length -gt 10 -and $content.Length -lt 500) {
+                        $userMessages += $content
+                        if ($userMessages.Count -ge 2) { break }
+                    }
+                }
+            }
+            catch { }
+        }
+        
+        # If no good messages from latest, try first 20 lines
+        if ($userMessages.Count -eq 0) {
+            $firstLines = Get-Content $filePath -TotalCount 20 -Encoding UTF8 -ErrorAction SilentlyContinue
+            foreach ($line in $firstLines) {
+                try {
+                    $entry = $line | ConvertFrom-Json -ErrorAction SilentlyContinue
+                    if ($entry.message -and $entry.message.role -eq "user" -and $entry.message.content) {
+                        $content = $entry.message.content
+                        if ($content -is [string] -and $content.Length -gt 10 -and $content.Length -lt 500) {
+                            $userMessages += $content
+                            if ($userMessages.Count -ge 2) { break }
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+    }
+    catch { }
+    
+    if ($userMessages.Count -eq 0) {
+        return "(no content)"
+    }
+    
+    $messagesText = ($userMessages -join " | ")
+    if ($messagesText.Length -gt 400) {
+        $messagesText = $messagesText.Substring(0, 400)
+    }
+    
+    $prompt = "Create a short title (10-30 chars) in Japanese describing what this coding session is about. Output ONLY the title, no explanation. Session content: $messagesText"
+    
+    try {
+        $env:ANTHROPIC_API_KEY = ""
+        $result = & $ClaudeExe -p $prompt --model haiku --dangerously-skip-permissions 2>$null
+        if ($result) {
+            $title = ($result -split "`n")[0].Trim().Trim('"').Trim("'")
+            if ($title.Length -gt 50) { $title = $title.Substring(0, 50) }
+            if ($title.Length -gt 3 -and -not ($title -match "^(I |This |The |Here |Sorry)")) {
+                return $title
+            }
+        }
+    }
+    catch { }
+    
+    return "(no content)"
+}
+
+
 # Generate AI summary (verbose mode for manual trigger)
 function Get-AISummary {
     param($sessionId, $filePath)
@@ -480,6 +633,9 @@ foreach ($group in $grouped) {
 
 # Sort final list by LastModified
 $sessions = $sessions | Sort-Object LastModified -Descending
+
+# AI title regeneration disabled for now (use S key in interactive mode)
+# TODO: Enable when performance is acceptable
 
 $duplicateCount = $script:duplicateFiles.Count
 if ($duplicateCount -gt 0) {
