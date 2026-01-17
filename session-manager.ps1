@@ -135,7 +135,11 @@ function Get-QuickTitle {
             "claude.skills.",
             "^py ",
             "^File Reading:",
-            "^- First attempted"
+            "^- First attempted",
+            "^Web Searches Performed:",
+            "5-20",
+            "^File Edits:",
+            "[\uFF61-\uFF9F]"
         )
 
         foreach ($pattern in $skipPatterns) {
@@ -146,6 +150,7 @@ function Get-QuickTitle {
         if ($text -match "\.(png|jpg|jpeg|gif|md|ps1|json|txt|ts|js|py)") { return $false }
 
         # Skip if garbled (>1/3 unusual chars)
+        # Also skip if contains Shift-JIS mojibake patterns (half-width katakana)
         $cleanChars = ($text -replace "[a-zA-Z0-9\u3040-\u30FF\u4E00-\u9FFF\s\-\.\,\!\?\(\)\:：、。「」]", "")
         if ($cleanChars.Length -gt ($text.Length / 3)) { return $false }
 
