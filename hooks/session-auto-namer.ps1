@@ -91,8 +91,8 @@ function Get-AISummary {
         $messagesText = $messagesText.Substring(0, 500)
     }
 
-    # English prompt to avoid encoding issues, allow Japanese output
-    $prompt = "Create a short title (3-8 words) for this coding session. Output ONLY the title, nothing else. No quotes, no explanation. Example outputs: 'GitHub Actions CI setup' or 'React component refactoring' or 'Firebase auth implementation'. Session content: $messagesText"
+    # Japanese prompt for better readability
+    $prompt = "このコーディングセッションの短いタイトルを日本語で作成して。5-20文字程度で、何をやってるか一目でわかるように。タイトルのみ出力、説明不要。例：'GitHub Actions設定' 'Reactコンポーネント修正' 'SE通知hookデバッグ' 'Firebase認証実装'。セッション内容: $messagesText"
 
     try {
         $env:ANTHROPIC_API_KEY = ""
@@ -129,18 +129,26 @@ try {
         exit 0
     }
 
-    # Get session ID
+    # Get session ID (from first line or filename)
+    $sessionId = $null
+
+    # Try to get from first line
     $firstLine = Get-Content $recentFile.FullName -TotalCount 1 -ErrorAction SilentlyContinue
-    if (-not $firstLine) {
-        exit 0
+    if ($firstLine) {
+        $data = $firstLine | ConvertFrom-Json -ErrorAction SilentlyContinue
+        if ($data.sessionId) {
+            $sessionId = $data.sessionId
+        }
     }
 
-    $data = $firstLine | ConvertFrom-Json -ErrorAction SilentlyContinue
-    if (-not $data.sessionId) {
-        exit 0
+    # Fallback: get from filename (for compacted sessions)
+    if (-not $sessionId) {
+        $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($recentFile.Name)
     }
 
-    $sessionId = $data.sessionId
+    if (-not $sessionId) {
+        exit 0
+    }
 
     # Always re-summarize to keep name current (task might have changed)
     $summary = Get-AISummary -filePath $recentFile.FullName

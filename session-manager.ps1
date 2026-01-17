@@ -254,7 +254,8 @@ function Get-AISummaryQuiet {
         $messagesText = $messagesText.Substring(0, 500)
     }
 
-    $prompt = "Create a short title (3-8 words) for this coding session. Output ONLY the title, nothing else. No quotes, no explanation. Example outputs: 'GitHub Actions CI setup' or 'React component refactoring' or 'Firebase auth implementation'. Session content: $messagesText"
+    # Japanese prompt for better readability
+    $prompt = "このコーディングセッションの短いタイトルを日本語で作成して。5-20文字程度で、何をやってるか一目でわかるように。タイトルのみ出力、説明不要。例：'GitHub Actions設定' 'Reactコンポーネント修正' 'SE通知hookデバッグ' 'Firebase認証実装'。セッション内容: $messagesText"
 
     try {
         $env:ANTHROPIC_API_KEY = ""
