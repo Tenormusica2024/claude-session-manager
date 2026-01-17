@@ -11,12 +11,25 @@ $ClaudeExe = "$env:USERPROFILE\.bun\bin\claude.exe"
 # Global: Track duplicate files for cleanup
 $script:duplicateFiles = @()
 
-# Load session names
+# Load session names (convert PSCustomObject to hashtable for dynamic property addition)
 function Get-SessionNames {
     if (Test-Path $NamesFile) {
         try {
             $content = Get-Content $NamesFile -Raw -ErrorAction Stop
-            return ($content | ConvertFrom-Json -ErrorAction Stop)
+            $json = $content | ConvertFrom-Json -ErrorAction Stop
+
+            # Convert sessions PSCustomObject to hashtable
+            $sessionsHash = @{}
+            if ($json.sessions) {
+                $json.sessions.PSObject.Properties | ForEach-Object {
+                    $sessionsHash[$_.Name] = @{
+                        name = $_.Value.name
+                        updatedAt = $_.Value.updatedAt
+                        type = $_.Value.type
+                    }
+                }
+            }
+            return @{ sessions = $sessionsHash }
         }
         catch {
             return @{ sessions = @{} }
