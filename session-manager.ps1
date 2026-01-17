@@ -79,20 +79,31 @@ function Get-AISummaryQuiet {
         return $null
     }
 
-    # Create prompt for summarization
-    $messagesText = ($userMessages | Select-Object -First 5) -join "`n---`n"
-    $prompt = "Summarize this Claude Code session in 5-10 words (Japanese OK). Focus on the main task/topic. Just output the summary, nothing else:`n`n$messagesText"
+    # Create prompt for summarization - strict title-only format
+    $messagesText = ($userMessages | Select-Object -First 3) -join " | "
+    # Truncate to avoid too long input
+    if ($messagesText.Length -gt 500) {
+        $messagesText = $messagesText.Substring(0, 500)
+    }
+
+    # English prompt to avoid encoding issues, allow Japanese output
+    $prompt = "Create a short title (3-8 words) for this coding session. Output ONLY the title, nothing else. No quotes, no explanation. Example outputs: 'GitHub Actions CI setup' or 'React component refactoring' or 'Firebase auth implementation'. Session content: $messagesText"
 
     # Call claude -p with Haiku for fast summarization
     try {
         $env:ANTHROPIC_API_KEY = ""
-        $summary = & $ClaudeExe -p $prompt --model haiku --dangerously-skip-permissions 2>$null
-        if ($summary) {
-            $summary = $summary.Trim()
-            if ($summary.Length -gt 50) {
-                $summary = $summary.Substring(0, 50)
+        $result = & $ClaudeExe -p $prompt --model haiku --dangerously-skip-permissions 2>$null
+        if ($result) {
+            # Take only first line, remove quotes and trim
+            $summary = ($result -split "`n")[0].Trim().Trim('"').Trim("'")
+            # Limit length
+            if ($summary.Length -gt 40) {
+                $summary = $summary.Substring(0, 40)
             }
-            return $summary
+            # Skip if it looks like a long explanation
+            if ($summary.Length -gt 5 -and -not ($summary -match "^(I |This |The |Here |Let me|Sorry|申し訳|ただいま)")) {
+                return $summary
+            }
         }
     }
     catch { }
