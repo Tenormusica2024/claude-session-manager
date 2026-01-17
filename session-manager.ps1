@@ -71,7 +71,7 @@ function Get-SessionDisplayName {
     param($sessionId, $defaultSummary, $names)
 
     $sessionData = $names.sessions.$sessionId
-    if ($sessionData -and $sessionData.name) {
+    if ($sessionData -and $sessionData.name -and $sessionData.type -ne "ai-hook") {
         return $sessionData.name
     }
     return $defaultSummary
@@ -540,8 +540,33 @@ function Get-AITitlesParallel {
             $env:ANTHROPIC_API_KEY = ""
             # Read context from file (preserves encoding)
             $context = [System.IO.File]::ReadAllText($contextFile, [System.Text.Encoding]::UTF8)
-            $prompt = "TASK: Create a 25-50 char Japanese title for this session. Describe what the user asked or discussed. Be SPECIFIC. Output ONLY the title, no quotes. SESSION: $context"
-            $result = & $exe -p $prompt --model haiku --dangerously-skip-permissions --setting-sources "local" 2>$null
+            $prompt = "TASK: Generate a session title in Japanese (20-40 chars).
+
+RULES:
+1. Describe the USER'S GOAL or PROBLEM (not what Claude said)
+2. Be SPECIFIC - mention tools, services, or topics discussed
+3. Output ONLY the title - no quotes, no explanation
+4. If session has no real work (just greetings, testing, auto-reports), output: SKIP
+5. NEVER copy-paste user messages - ALWAYS summarize in your own words
+6. Title must be 20-40 chars. Longer = INVALID
+
+BAD TITLES (output SKIP instead):
+- Greetings: 'こんにちは' '頑張って' 'ありがとう'
+- Copy-paste of user message (even partial)
+- Sentences longer than 50 chars
+- Meta-comments about session
+- Vague: 'セッション確認' '作業完了' '実行が必須'
+- English titles when Japanese content
+
+GOOD TITLES (concise, summarized):
+- 'ココナラ競合サービスの価格調査'
+- 'Firebase認証エラーのデバッグ'
+- 'AI最新ニュースの定期収集設定'
+- 'ブログ記事の設計と実装分担の相談'
+
+SESSION:
+$context"
+            $result = & $exe -p $prompt --model sonnet --dangerously-skip-permissions --setting-sources "local" 2>$null
             # Return as Base64 to avoid encoding issues, with index prefix
             $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($result))
             "$idx|$encoded"
@@ -695,6 +720,11 @@ foreach ($projectDir in $projectDirs) {
             if ($defaultSummary -match "医N繧|縺薙・繧|繧ｳ繝ｼ繝|郢ｧ・ｳ|邵ｺ阮") {
                 continue
             }
+            
+            # Skip hook/skill auto-generated sessions
+            if ($defaultSummary -match "(Base directory|this skill|GitHub Issue|報告しました|報告したよ|報告完了|セッション終了|セッション完了|サマリー|了解です|セッションの概要)") {
+                continue
+            }
 
             # Skip very small sessions (likely warmup or AI prompt sessions)
             if ($jsonFile.Length -lt 5000) {
@@ -709,10 +739,13 @@ foreach ($projectDir in $projectDirs) {
             # Get display name (custom name or default)
             $displayName = Get-SessionDisplayName -sessionId $sessionId -defaultSummary $defaultSummary -names $sessionNames
 
-            # Check if has custom name
+            # Check if has custom name (ignore ai-hook type - those are auto-generated garbage)
             $hasCustomName = $false
             if ($sessionNames.sessions.$sessionId -and $sessionNames.sessions.$sessionId.name) {
-                $hasCustomName = $true
+                $nameType = $sessionNames.sessions.$sessionId.type
+                if ($nameType -ne "ai-hook") {
+                    $hasCustomName = $true
+                }
             }
 
             $allSessions += [PSCustomObject]@{
@@ -758,25 +791,34 @@ if (Test-Path $titleCachePath) {
     } catch { $titleCache = @{} }
 }
 
-# Apply cached titles first
+# Apply cached titles first, filter out SKIP entries
+$sessionsToRemove = @()
 foreach ($session in $sessions) {
     $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($session.FilePath)
     if ($titleCache.ContainsKey($sessionId)) {
-        $session.Summary = $titleCache[$sessionId]
+        if ($titleCache[$sessionId] -eq "SKIP") {
+            $sessionsToRemove += $session
+        } else {
+            $session.Summary = $titleCache[$sessionId]
+        }
     }
 }
+$sessions = $sessions | Where-Object { $_ -notin $sessionsToRemove }
 
-# AI title validation for top 15 sessions (LLM judges if title is good)
-$maxValidate = [Math]::Min(15, $sessions.Count)
+# AI title validation: prioritize sessions without cached titles
+$maxValidate = 15
 $sessionsToValidate = @()
+$validatedCount = 0
 
-for ($i = 0; $i -lt $maxValidate; $i++) {
+for ($i = 0; $i -lt $sessions.Count -and $validatedCount -lt $maxValidate; $i++) {
     $session = $sessions[$i]
     if ($session.HasCustomName) { continue }
     
     # Skip if already has cached title
     $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($session.FilePath)
     if ($titleCache.ContainsKey($sessionId)) { continue }
+    
+    $validatedCount++
     
     # Extract first 30 + last 30 lines for context
     $contextText = ""
@@ -831,10 +873,40 @@ for ($i = 0; $i -lt $maxValidate; $i++) {
             $sessionsToValidate += @{ Index = $i; FilePath = $session.FilePath; ContextText = $contextText; CurrentTitle = $currentTitle }
         }
     } else {
-        # Very little content - skip AI title generation (keep original)
+        # Very little content - mark as SKIP if default summary looks like copy-paste
         $lineCount = (Get-Content $session.FilePath -Encoding UTF8 -ErrorAction SilentlyContinue).Count
         if ($lineCount -lt 20) {
-            # Small sessions (< 20 lines) don't need AI summarization
+            $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($session.FilePath)
+            $titleCache[$sessionId] = "SKIP"
+            $sessions[$i].Summary = "SKIP"
+            $cacheUpdated = $true
+        }
+    }
+}
+
+# Also filter out sessions with bad default summaries (copy-paste detection)
+$badSummaryPatterns = @(
+    "^画面表示",
+    "^実行が必須",
+    "^お、",
+    "^もう記事",
+    "^GitHub Task",
+    "^Bash Hooks",
+    "^\w+\.\w+ AI",
+    "^AI News Research",
+    "^[A-Z][a-z]+ [A-Z][a-z]+ (and|with|for)",
+    "✅.*✅"
+)
+foreach ($session in $sessions) {
+    $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($session.FilePath)
+    if (-not $titleCache.ContainsKey($sessionId)) {
+        foreach ($pattern in $badSummaryPatterns) {
+            if ($session.Summary -match $pattern) {
+                $titleCache[$sessionId] = "SKIP"
+                $session.Summary = "SKIP"
+                $cacheUpdated = $true
+                break
+            }
         }
     }
 }
@@ -843,19 +915,31 @@ if ($sessionsToValidate.Count -gt 0) {
     Write-Host "  Validating $($sessionsToValidate.Count) session titles with AI..." -ForegroundColor Yellow
     $aiResults = Get-AITitlesParallel -sessionInfos $sessionsToValidate
     $cacheUpdated = $false
+    $skipIndices = @()
     foreach ($idx in $aiResults.Keys) {
         $result = $aiResults[$idx]
+        # If AI says SKIP, mark for removal
+        if ($result -match "^SKIP") {
+            $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($sessions[$idx].FilePath)
+            $titleCache[$sessionId] = "SKIP"
+            $skipIndices += $idx
+            $cacheUpdated = $true
+            continue
+        }
         # Truncate if too long (allow up to 60 chars for more descriptive titles)
         if ($result.Length -gt 60) { $result = $result.Substring(0, 60) }
-        # Only use if it's a reasonable title (filter out error messages, apologies, generic titles, and markdown)
-        if ($result.Length -gt 5 -and $result -notmatch "(セッション概要|Session|タイトル|title|現在|OK|了解|申し訳|すみません|#|##|\*\*|セッション終了|セッション完了|コーディング作業が|タスクは完了していません|作成することができません|記録されていない|待機中|準備完了|指示待ち|依頼待ち)") {
+        # Only use if it's a reasonable title
+        if ($result.Length -gt 5 -and $result -notmatch "(セッション概要|Session|タイトル|title|現在|OK|了解|申し訳|すみません|#|##|\*\*|セッション終了|セッション完了|コーディング作業が|タスクは完了していません|作成することができません|記録されていない|待機中|準備完了|指示待ち|依頼待ち|Base directory|this skill|GitHub Issue|報告しました|報告したよ|報告完了|サマリー)") {
             $sessions[$idx].Summary = $result
-            # Save to cache
             $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($sessions[$idx].FilePath)
             $titleCache[$sessionId] = $result
             $cacheUpdated = $true
             Write-Host "  -> Session $idx`: $result" -ForegroundColor Cyan
         }
+    }
+    # Remove skipped sessions from list
+    if ($skipIndices.Count -gt 0) {
+        $sessions = $sessions | Where-Object { $sessions.IndexOf($_) -notin $skipIndices }
     }
     # Save updated cache
     if ($cacheUpdated) {
@@ -866,6 +950,12 @@ if ($sessionsToValidate.Count -gt 0) {
 # Also save cache if hook sessions were detected
 if ($titleCache.Count -gt 0) {
     $titleCache | ConvertTo-Json | Set-Content $titleCachePath -Encoding UTF8
+}
+
+# Final filter: remove all SKIP sessions from display
+$sessions = $sessions | Where-Object { 
+    $sid = [System.IO.Path]::GetFileNameWithoutExtension($_.FilePath)
+    -not ($titleCache.ContainsKey($sid) -and $titleCache[$sid] -eq "SKIP") -and $_.Summary -ne "SKIP"
 }
 
 $duplicateCount = $script:duplicateFiles.Count
