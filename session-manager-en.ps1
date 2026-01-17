@@ -128,11 +128,10 @@ function Get-QuickTitle {
         $text = $text.Trim()
 
         # Remove markdown formatting
-        $text = $text -replace "\*\*(.+?)\*\*", '$1'  # bold
-        $text = $text -replace "```.+?```", ""  # code blocks
-        $text = $text -replace '`[^`]+`', ""  # inline code
-        $text = $text -replace "^\s*[-*]\s*", ""  # list markers
-        $text = $text -replace "^#+\s*", ""  # headers
+        $text = $text -replace '\*\*(.+?)\*\*', '$1'  # bold
+        $text = $text -replace '```[\s\S]*?```', ''  # code blocks
+        $text = $text -replace '^\s*[-*]\s*', ''  # list markers
+        $text = $text -replace '^#+\s*', ''  # headers
 
         return $text.Trim()
     }
