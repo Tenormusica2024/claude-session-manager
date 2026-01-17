@@ -102,7 +102,7 @@ function Get-QuickTitle {
 
         # Skip if too short or looks like just tool output
         if ($text.Length -lt 15) { continue }
-        if ($text -match "^(\{|\[|<|```|Error|undefined)") { continue }
+        if ($text -match "^(\{|\[|<|``````|Error|undefined)") { continue }
 
         # Take first meaningful sentence (up to 50 chars)
         $title = $text
@@ -117,7 +117,7 @@ function Get-QuickTitle {
         }
 
         # Skip if it's just greeting or generic
-        if ($title -match "^(Hi|Hello|Sure|OK|はい|了解|承知)") { continue }
+        if ($title -match "^(Hi|Hello|Sure|OK)") { continue }
 
         return $title
     }
@@ -132,7 +132,7 @@ function Get-QuickTitle {
                     $title = $content -replace "`n", " " -replace "\s+", " "
                     $title = $title.Trim()
                     # Skip URLs and code
-                    if ($title -match "^(http|```|import |const |var |let |function )") { continue }
+                    if ($title -match "^(http|``````|import |const |var |let |function )") { continue }
                     if ($title.Length -gt 40) {
                         $title = $title.Substring(0, 40) + "..."
                     }
@@ -186,7 +186,7 @@ function Get-AISummaryQuiet {
             if ($summary.Length -gt 40) {
                 $summary = $summary.Substring(0, 40)
             }
-            if ($summary.Length -gt 5 -and -not ($summary -match "^(I |This |The |Here |Let me|Sorry|申し訳|ただいま)")) {
+            if ($summary.Length -gt 5 -and -not ($summary -match "^(I |This |The |Here |Let me|Sorry)")) {
                 return $summary
             }
         }
