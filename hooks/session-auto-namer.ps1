@@ -1,5 +1,6 @@
-# Session Auto-Namer Hook
-# Runs on Stop event to auto-name the current session
+# Session Auto-Namer Hook (Stop Hook)
+# Runs after each Claude response to keep session name updated
+# Uses Haiku for fast summarization (~1-2 seconds)
 
 $NamesFile = "$env:USERPROFILE\.claude\session-names.json"
 $ProjectsDir = "$env:USERPROFILE\.claude\projects"
@@ -47,7 +48,7 @@ function Get-MostRecentSession {
     return $mostRecent
 }
 
-# Generate AI summary
+# Generate AI summary using Haiku for speed
 function Get-AISummary {
     param($filePath)
 
@@ -75,7 +76,8 @@ function Get-AISummary {
 
     try {
         $env:ANTHROPIC_API_KEY = ""
-        $summary = & $ClaudeExe -p $prompt --dangerously-skip-permissions 2>$null
+        # Use Haiku for fast summarization
+        $summary = & $ClaudeExe -p $prompt --model haiku --dangerously-skip-permissions 2>$null
         if ($summary) {
             $summary = $summary.Trim()
             if ($summary.Length -gt 50) {
@@ -96,9 +98,9 @@ try {
         exit 0
     }
 
-    # Check if recently modified (within last 5 minutes = likely current session)
+    # Check if recently modified (within last 2 minutes = likely current session)
     $timeSinceModified = (Get-Date) - $recentFile.LastWriteTime
-    if ($timeSinceModified.TotalMinutes -gt 5) {
+    if ($timeSinceModified.TotalMinutes -gt 2) {
         exit 0
     }
 
@@ -115,20 +117,14 @@ try {
 
     $sessionId = $data.sessionId
 
-    # Check if already named
-    $sessionNames = Get-SessionNames
-    if ($sessionNames.sessions.$sessionId -and $sessionNames.sessions.$sessionId.name) {
-        # Already has a name, skip
-        exit 0
-    }
-
-    # Generate summary
+    # Always re-summarize to keep name current (task might have changed)
     $summary = Get-AISummary -filePath $recentFile.FullName
     if (-not $summary) {
         exit 0
     }
 
-    # Save
+    # Load and save
+    $sessionNames = Get-SessionNames
     if (-not $sessionNames.sessions) {
         $sessionNames.sessions = @{}
     }
@@ -139,7 +135,7 @@ try {
     }
     Save-SessionNames -names $sessionNames
 
-    Write-Host "[Session Auto-Namer] Named session: $summary" -ForegroundColor Green
+    # Silent success - don't disrupt user workflow
 }
 catch {
     # Silently fail - don't disrupt user workflow

@@ -8,6 +8,9 @@ $NamesFile = "$env:USERPROFILE\.claude\session-names.json"
 $ProjectsDir = "$env:USERPROFILE\.claude\projects"
 $ClaudeExe = "$env:USERPROFILE\.bun\bin\claude.exe"
 
+# Global: Track duplicate files for cleanup
+$script:duplicateFiles = @()
+
 # Load session names
 function Get-SessionNames {
     if (Test-Path $NamesFile) {
@@ -39,7 +42,7 @@ function Get-SessionDisplayName {
     return $defaultSummary
 }
 
-# Generate AI summary for a session (silent mode for batch processing)
+# Generate AI summary for a session (silent mode, uses Haiku for speed)
 function Get-AISummaryQuiet {
     param($sessionId, $filePath)
 
@@ -67,10 +70,10 @@ function Get-AISummaryQuiet {
     $messagesText = ($userMessages | Select-Object -First 5) -join "`n---`n"
     $prompt = "Summarize this Claude Code session in 5-10 words (Japanese OK). Focus on the main task/topic. Just output the summary, nothing else:`n`n$messagesText"
 
-    # Call claude -p for summarization
+    # Call claude -p with Haiku for fast summarization
     try {
         $env:ANTHROPIC_API_KEY = ""
-        $summary = & $ClaudeExe -p $prompt --dangerously-skip-permissions 2>$null
+        $summary = & $ClaudeExe -p $prompt --model haiku --dangerously-skip-permissions 2>$null
         if ($summary) {
             $summary = $summary.Trim()
             if ($summary.Length -gt 50) {
@@ -89,7 +92,7 @@ function Get-AISummary {
     param($sessionId, $filePath)
 
     Write-Host ""
-    Write-Host "Generating AI summary..." -ForegroundColor Yellow
+    Write-Host "Generating AI summary (Haiku)..." -ForegroundColor Yellow
 
     $summary = Get-AISummaryQuiet -sessionId $sessionId -filePath $filePath
 
@@ -103,6 +106,45 @@ function Get-AISummary {
     return $summary
 }
 
+# Cleanup duplicate session files
+function Remove-DuplicateFiles {
+    param($duplicates)
+
+    if ($duplicates.Count -eq 0) {
+        Write-Host "No duplicate files to clean up." -ForegroundColor Yellow
+        return 0
+    }
+
+    Write-Host ""
+    Write-Host "Found $($duplicates.Count) duplicate files to remove:" -ForegroundColor Yellow
+    foreach ($file in $duplicates) {
+        Write-Host "  - $($file.Name) ($(($file.LastWriteTime).ToString('yyyy-MM-dd HH:mm')))" -ForegroundColor Gray
+    }
+
+    Write-Host ""
+    Write-Host "Delete these files? [Y/N]: " -NoNewline -ForegroundColor Cyan
+    $confirm = Read-Host
+
+    if ($confirm -match "^[Yy]") {
+        $deleted = 0
+        foreach ($file in $duplicates) {
+            try {
+                Remove-Item $file.FullName -Force -ErrorAction Stop
+                $deleted++
+            }
+            catch {
+                Write-Host "  Failed to delete: $($file.Name)" -ForegroundColor Red
+            }
+        }
+        Write-Host "Deleted $deleted files." -ForegroundColor Green
+        return $deleted
+    }
+    else {
+        Write-Host "Cancelled." -ForegroundColor Yellow
+        return 0
+    }
+}
+
 Write-Host "=== Claude Session Manager ===" -ForegroundColor Cyan
 
 # Load names database
@@ -110,15 +152,14 @@ $sessionNames = Get-SessionNames
 
 # Get sessions
 Write-Host "Scanning sessions..."
-$sessions = @()
+$allSessions = @()
 
 $projectDirs = Get-ChildItem -Path $ProjectsDir -Directory -ErrorAction SilentlyContinue
 Write-Host "Found $($projectDirs.Count) project dirs"
 
 foreach ($projectDir in $projectDirs) {
     $jsonFiles = Get-ChildItem -Path $projectDir.FullName -Filter "*.jsonl" -ErrorAction SilentlyContinue |
-                 Sort-Object LastWriteTime -Descending |
-                 Select-Object -First 15
+                 Sort-Object LastWriteTime -Descending
 
     foreach ($jsonFile in $jsonFiles) {
         try {
@@ -149,13 +190,14 @@ foreach ($projectDir in $projectDirs) {
                 $hasCustomName = $true
             }
 
-            $sessions += [PSCustomObject]@{
+            $allSessions += [PSCustomObject]@{
                 SessionId = $data.sessionId
                 Summary = $displayName
                 DefaultSummary = $defaultSummary
                 LastModified = $jsonFile.LastWriteTime
                 HasCustomName = $hasCustomName
                 FilePath = $jsonFile.FullName
+                FileInfo = $jsonFile
             }
         }
         catch {
@@ -164,10 +206,31 @@ foreach ($projectDir in $projectDirs) {
     }
 }
 
-# Remove duplicates and sort by LastModified
-$sessions = $sessions | Sort-Object LastModified -Descending | Select-Object -Unique -Property SessionId, Summary, DefaultSummary, LastModified, HasCustomName, FilePath
+# Proper deduplication by SessionId - keep only the most recent
+$grouped = $allSessions | Group-Object SessionId
+$sessions = @()
+$script:duplicateFiles = @()
 
-Write-Host "Found $($sessions.Count) sessions" -ForegroundColor Green
+foreach ($group in $grouped) {
+    $sorted = $group.Group | Sort-Object LastModified -Descending
+    # Keep the newest
+    $sessions += $sorted[0]
+    # Track older duplicates for potential cleanup
+    if ($sorted.Count -gt 1) {
+        $script:duplicateFiles += $sorted[1..($sorted.Count-1)] | ForEach-Object { $_.FileInfo }
+    }
+}
+
+# Sort final list by LastModified
+$sessions = $sessions | Sort-Object LastModified -Descending
+
+$duplicateCount = $script:duplicateFiles.Count
+if ($duplicateCount -gt 0) {
+    Write-Host "Found $($sessions.Count) unique sessions ($duplicateCount duplicates detected)" -ForegroundColor Green
+}
+else {
+    Write-Host "Found $($sessions.Count) sessions" -ForegroundColor Green
+}
 
 # Auto-summarize unnamed sessions on startup
 if (-not $NoAutoSummary -and $Command -eq "interactive") {
@@ -175,7 +238,7 @@ if (-not $NoAutoSummary -and $Command -eq "interactive") {
 
     if ($unnamedSessions.Count -gt 0) {
         Write-Host ""
-        Write-Host "Auto-summarizing $($unnamedSessions.Count) unnamed sessions..." -ForegroundColor Yellow
+        Write-Host "Auto-summarizing $($unnamedSessions.Count) unnamed sessions (Haiku)..." -ForegroundColor Yellow
         Write-Host "(Use -NoAutoSummary to skip this)" -ForegroundColor Gray
 
         $count = 0
@@ -223,6 +286,9 @@ if ($Command -eq "interactive" -and $sessions.Count -gt 0) {
     while ($true) {
         Clear-Host
         Write-Host "=== Claude Session Manager ===" -ForegroundColor Cyan
+        if ($script:duplicateFiles.Count -gt 0) {
+            Write-Host "($($script:duplicateFiles.Count) duplicate files - press D to clean up)" -ForegroundColor DarkYellow
+        }
         Write-Host ""
 
         for ($i = 0; $i -lt $maxDisplay; $i++) {
@@ -240,7 +306,12 @@ if ($Command -eq "interactive" -and $sessions.Count -gt 0) {
         }
 
         Write-Host ""
-        Write-Host "[Up/Down] Move  [Enter] Resume  [S] Re-summarize  [N] Name  [Q] Quit" -ForegroundColor Gray
+        $helpText = "[Up/Down] Move  [Enter] Resume  [S] Re-summarize  [N] Name"
+        if ($script:duplicateFiles.Count -gt 0) {
+            $helpText += "  [D] Clean duplicates"
+        }
+        $helpText += "  [Q] Quit"
+        Write-Host $helpText -ForegroundColor Gray
 
         $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 
@@ -304,10 +375,28 @@ if ($Command -eq "interactive" -and $sessions.Count -gt 0) {
                     Start-Sleep -Milliseconds 500
                 }
             }
+            68 {  # D - Clean duplicates
+                if ($script:duplicateFiles.Count -gt 0) {
+                    $deleted = Remove-DuplicateFiles -duplicates $script:duplicateFiles
+                    if ($deleted -gt 0) {
+                        $script:duplicateFiles = @()
+                    }
+                    Write-Host "Press any key to continue..." -ForegroundColor Gray
+                    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+                }
+            }
             81 { return }  # Q
             default {
                 $char = $key.Character.ToString().ToLower()
                 if ($char -eq 'q') { return }
+                if ($char -eq 'd' -and $script:duplicateFiles.Count -gt 0) {
+                    $deleted = Remove-DuplicateFiles -duplicates $script:duplicateFiles
+                    if ($deleted -gt 0) {
+                        $script:duplicateFiles = @()
+                    }
+                    Write-Host "Press any key to continue..." -ForegroundColor Gray
+                    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+                }
                 if ($char -eq 's') {
                     $selected = $sessions[$selectedIndex]
                     $summary = Get-AISummary -sessionId $selected.SessionId -filePath $selected.FilePath
