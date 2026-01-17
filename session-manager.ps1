@@ -55,7 +55,98 @@ function Get-SessionDisplayName {
     return $defaultSummary
 }
 
-# Generate AI summary for a session (silent mode, uses Haiku for speed)
+# Quick fallback title from assistant responses (no API call - instant)
+# Looks at recent assistant responses which tend to summarize the topic better
+function Get-QuickTitle {
+    param($filePath)
+
+    # Read last 100 lines to get recent messages
+    $allLines = Get-Content $filePath -ErrorAction SilentlyContinue
+    if (-not $allLines -or $allLines.Count -eq 0) { return $null }
+
+    # Get last 100 lines (most recent)
+    $recentLines = $allLines | Select-Object -Last 100
+
+    # Collect assistant responses (in reverse order - newest first)
+    $assistantResponses = @()
+    for ($i = $recentLines.Count - 1; $i -ge 0; $i--) {
+        try {
+            $entry = $recentLines[$i] | ConvertFrom-Json -ErrorAction SilentlyContinue
+            if ($entry.message -and $entry.message.role -eq "assistant" -and $entry.message.content) {
+                $content = $entry.message.content
+                # Handle array content (tool calls etc)
+                if ($content -is [array]) {
+                    foreach ($item in $content) {
+                        if ($item.type -eq "text" -and $item.text) {
+                            $assistantResponses += $item.text
+                            break
+                        }
+                    }
+                }
+                elseif ($content -is [string] -and $content.Length -gt 10) {
+                    $assistantResponses += $content
+                }
+            }
+        }
+        catch { }
+
+        # Stop after collecting 3 assistant responses
+        if ($assistantResponses.Count -ge 3) { break }
+    }
+
+    # Try to extract title from assistant responses
+    foreach ($response in $assistantResponses) {
+        # Clean up
+        $text = $response -replace "`n", " " -replace "\s+", " "
+        $text = $text.Trim()
+
+        # Skip if too short or looks like just tool output
+        if ($text.Length -lt 15) { continue }
+        if ($text -match "^(\{|\[|<|```|Error|undefined)") { continue }
+
+        # Take first meaningful sentence (up to 50 chars)
+        $title = $text
+        if ($title.Length -gt 50) {
+            $title = $title.Substring(0, 50)
+            # Try to break at word boundary
+            $lastSpace = $title.LastIndexOf(" ")
+            if ($lastSpace -gt 30) {
+                $title = $title.Substring(0, $lastSpace)
+            }
+            $title = $title + "..."
+        }
+
+        # Skip if it's just greeting or generic
+        if ($title -match "^(Hi|Hello|Sure|OK|はい|了解|承知)") { continue }
+
+        return $title
+    }
+
+    # Fallback: first user message (last resort)
+    foreach ($line in $allLines | Select-Object -First 5) {
+        try {
+            $entry = $line | ConvertFrom-Json -ErrorAction SilentlyContinue
+            if ($entry.message -and $entry.message.role -eq "user" -and $entry.message.content) {
+                $content = $entry.message.content
+                if ($content -is [string] -and $content.Length -gt 5) {
+                    $title = $content -replace "`n", " " -replace "\s+", " "
+                    $title = $title.Trim()
+                    # Skip URLs and code
+                    if ($title -match "^(http|```|import |const |var |let |function )") { continue }
+                    if ($title.Length -gt 40) {
+                        $title = $title.Substring(0, 40) + "..."
+                    }
+                    return $title
+                }
+            }
+        }
+        catch { }
+    }
+
+    return $null
+}
+
+# Generate AI summary for a session (used by manual S key only)
 function Get-AISummaryQuiet {
     param($sessionId, $filePath)
 
@@ -81,26 +172,20 @@ function Get-AISummaryQuiet {
 
     # Create prompt for summarization - strict title-only format
     $messagesText = ($userMessages | Select-Object -First 3) -join " | "
-    # Truncate to avoid too long input
     if ($messagesText.Length -gt 500) {
         $messagesText = $messagesText.Substring(0, 500)
     }
 
-    # English prompt to avoid encoding issues, allow Japanese output
     $prompt = "Create a short title (3-8 words) for this coding session. Output ONLY the title, nothing else. No quotes, no explanation. Example outputs: 'GitHub Actions CI setup' or 'React component refactoring' or 'Firebase auth implementation'. Session content: $messagesText"
 
-    # Call claude -p with Haiku for fast summarization
     try {
         $env:ANTHROPIC_API_KEY = ""
         $result = & $ClaudeExe -p $prompt --model haiku --dangerously-skip-permissions 2>$null
         if ($result) {
-            # Take only first line, remove quotes and trim
             $summary = ($result -split "`n")[0].Trim().Trim('"').Trim("'")
-            # Limit length
             if ($summary.Length -gt 40) {
                 $summary = $summary.Substring(0, 40)
             }
-            # Skip if it looks like a long explanation
             if ($summary.Length -gt 5 -and -not ($summary -match "^(I |This |The |Here |Let me|Sorry|申し訳|ただいま)")) {
                 return $summary
             }
@@ -256,50 +341,45 @@ else {
     Write-Host "Found $($sessions.Count) sessions" -ForegroundColor Green
 }
 
-# Auto-summarize unnamed sessions on startup
+# Auto-title unnamed sessions on startup (instant - no API calls)
+# Sessions with hook-generated names are already handled
 if (-not $NoAutoSummary -and $Command -eq "interactive") {
-    $unnamedSessions = @($sessions | Where-Object { -not $_.HasCustomName } | Select-Object -First 10)
+    $unnamedSessions = @($sessions | Where-Object { -not $_.HasCustomName } | Select-Object -First 20)
 
     if ($unnamedSessions.Count -gt 0) {
         Write-Host ""
-        Write-Host "Auto-summarizing $($unnamedSessions.Count) unnamed sessions (Haiku)..." -ForegroundColor Yellow
-        Write-Host "(Use -NoAutoSummary to skip this)" -ForegroundColor Gray
+        Write-Host "Auto-titling $($unnamedSessions.Count) unnamed sessions..." -ForegroundColor Yellow
 
         $count = 0
+        $titled = 0
         foreach ($session in $unnamedSessions) {
             $count++
-            Write-Host "  [$count/$($unnamedSessions.Count)] $($session.SessionId.Substring(0,8))... " -NoNewline
 
-            $summary = Get-AISummaryQuiet -sessionId $session.SessionId -filePath $session.FilePath
+            # Use quick title extraction (no API call - instant)
+            $title = Get-QuickTitle -filePath $session.FilePath
 
-            if ($summary) {
+            if ($title) {
                 # Save to names database
                 if (-not $sessionNames.sessions) {
                     $sessionNames.sessions = @{}
                 }
                 $sessionNames.sessions.($session.SessionId) = @{
-                    name = $summary
+                    name = $title
                     updatedAt = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss")
-                    type = "ai-auto"
+                    type = "quick"
                 }
 
                 # Update session object
-                $session.Summary = $summary
+                $session.Summary = $title
                 $session.HasCustomName = $true
-
-                Write-Host $summary -ForegroundColor Green
-            }
-            else {
-                Write-Host "(skipped)" -ForegroundColor Gray
+                $titled++
             }
         }
 
         # Save all names at once
         Save-SessionNames -names $sessionNames
 
-        Write-Host ""
-        Write-Host "Auto-summarization complete!" -ForegroundColor Green
-        Start-Sleep -Milliseconds 500
+        Write-Host "Titled $titled sessions (instant)" -ForegroundColor Green
     }
 }
 
