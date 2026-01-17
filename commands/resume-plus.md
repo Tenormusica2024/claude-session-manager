@@ -1,8 +1,8 @@
-# Session Manager
+# Resume Plus
 
-Enhanced `/resume` alternative with AI-powered session titles.
+`/resume` with AI-powered session titles.
 
-Launch the interactive session manager to browse, search, and resume past sessions.
+Browse and resume past sessions with automatically generated descriptive titles instead of UUIDs.
 
 ## Execution
 
@@ -13,7 +13,7 @@ powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\session-manag
 ## Controls
 
 - **Up/Down**: Navigate sessions
-- **Enter**: Resume selected session
+- **Enter**: Resume selected session  
 - **S**: Re-generate AI summary
 - **N**: Manually name session
 - **Q**: Quit
