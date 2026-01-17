@@ -1,6 +1,6 @@
 # Claude Session Manager
 
-A lightweight PowerShell-based session manager for Claude Code CLI. Navigate and resume past sessions with an interactive TUI.
+A lightweight PowerShell-based session manager for Claude Code CLI. Navigate, name, and resume past sessions with an interactive TUI.
 
 ## Problem
 
@@ -14,6 +14,8 @@ Claude Code's built-in `/resume` command shows sessions with auto-generated UUID
 This tool provides an interactive session selector that:
 - Shows the first user message as a session summary
 - Allows arrow key navigation (like `/resume`)
+- AI-powered session summarization (press `S`)
+- Manual session naming (press `N`)
 - Instantly resumes selected sessions
 
 ## Screenshot
@@ -21,14 +23,32 @@ This tool provides an interactive session selector that:
 ```
 === Claude Session Manager ===
 
-> [1] ClaudeCodeセッション管理専用スラッシュコマ...
-  [2] sound platformでGoogle認証が...
-  [3] 了解、続きからだね♪ じゃあ遷移ボ...
-  [4] sound-platform-v8 プロジェクト...
-  [5] ダッシュボードの全画面チャットにサ...
+>  [1] ClaudeCodeセッション管理専用スラッシュコマ...
+  *[2] Sound Platform認証機能の実装
+   [3] sound platformでGoogle認証が...
+  *[4] GitHub Actions CI/CD設定
+   [5] ダッシュボードの全画面チャットにサ...
 
-[Up/Down] Move  [Enter] Resume  [Q] Quit
+[Up/Down] Move  [Enter] Resume  [S] AI Summary  [N] Name  [Q] Quit
 ```
+
+Sessions with custom names are marked with `*`.
+
+## Features
+
+### AI-Powered Summarization
+Press `S` to generate an AI summary of the selected session. The tool:
+1. Extracts user messages from the session
+2. Calls Claude to generate a 5-10 word summary
+3. Saves the summary to `~/.claude/session-names.json`
+
+### Manual Naming
+Press `N` to manually name a session. Useful when you want a specific name that the AI might not generate.
+
+### Smart Filtering
+- Automatically filters out "(no content)" and "Warmup" sessions
+- Removes duplicate entries
+- Shows most recent sessions first
 
 ## Installation
 
@@ -64,6 +84,8 @@ Copy-Item session-manager.ps1 "$env:USERPROFILE\.claude\"
 |-----|--------|
 | Up/Down | Navigate sessions |
 | Enter | Resume selected session |
+| S | Generate AI summary for selected session |
+| N | Manually name selected session |
 | Q | Quit |
 
 ### List Mode
@@ -74,7 +96,7 @@ Copy-Item session-manager.ps1 "$env:USERPROFILE\.claude\"
 
 Output:
 ```
-  e1e92b66... | ClaudeCodeセッション管理専用スラッシュ
+ *e1e92b66... | Sound Platform認証機能の実装
   a3b4c5d6... | sound platformでGoogle認証が
   ...
 ```
@@ -82,9 +104,33 @@ Output:
 ## How It Works
 
 1. Scans `~/.claude/projects/` for session files (`.jsonl`)
-2. Extracts the first user message from each session
-3. Displays an interactive TUI with arrow key navigation
-4. Executes `claude -r <session-id>` when Enter is pressed
+2. Loads custom names from `~/.claude/session-names.json`
+3. Extracts the first user message from each session (as default summary)
+4. Displays an interactive TUI with arrow key navigation
+5. When `S` is pressed, calls `claude -p` to generate a summary
+6. Saves custom names to JSON for persistence
+7. Executes `claude -r <session-id>` when Enter is pressed
+
+### Session Names Storage
+
+Custom session names are stored in `~/.claude/session-names.json`:
+
+```json
+{
+  "sessions": {
+    "e1e92b66-ca93-4c1d-...": {
+      "name": "Sound Platform認証機能の実装",
+      "updatedAt": "2026-01-17T11:20:00",
+      "type": "ai"
+    },
+    "a3b4c5d6-...": {
+      "name": "My Custom Name",
+      "updatedAt": "2026-01-17T11:25:00",
+      "type": "manual"
+    }
+  }
+}
+```
 
 ### Session Storage Structure
 
@@ -97,10 +143,6 @@ Output:
       └── ...
 ```
 
-Each `.jsonl` file contains session data with:
-- `sessionId`: UUID for the session
-- `message.content`: First user message (used as summary)
-
 ## Requirements
 
 - Windows PowerShell 5.1 or later
@@ -112,17 +154,18 @@ Current defaults (edit script to customize):
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| Project folders scanned | 2 | Number of project directories to scan |
-| Sessions per folder | 10 | Max sessions loaded per project |
-| Display limit | 10 | Max sessions shown in TUI |
-| Summary length | 40 chars | Truncation length for summaries |
+| Sessions per folder | 15 | Max sessions loaded per project |
+| Display limit | 15 | Max sessions shown in TUI |
+| Summary length | 50 chars | Max length for custom names |
 
 ## Roadmap
 
-- [ ] Filter out "(no content)" and "Warmup" sessions
-- [ ] Session naming feature (press `n` to name)
-- [ ] Scan all project folders
-- [ ] Duplicate session detection
+- [x] Filter out "(no content)" and "Warmup" sessions
+- [x] Session naming feature (press `N` to name)
+- [x] AI-powered summarization (press `S`)
+- [x] Scan all project folders
+- [x] Duplicate session detection
+- [ ] Auto-update summary when task changes (via hooks)
 - [ ] Search/filter functionality
 - [ ] Cross-platform support (bash version)
 
