@@ -469,6 +469,55 @@ function Get-AIGeneratedTitle {
 }
 
 
+# Parallel AI title generation for multiple sessions (fast)
+function Get-AITitlesParallel {
+    param($sessionInfos)  # Array of @{Index; FilePath; Prompt}
+    
+    if ($sessionInfos.Count -eq 0) { return @{} }
+    
+    $ClaudeExe = "$env:USERPROFILE\.bun\bin\claude.exe"
+    $results = @{}
+    
+    # Start all jobs in parallel
+    $jobs = @()
+    foreach ($info in $sessionInfos) {
+        $job = Start-Job -ScriptBlock {
+            param($exe, $prompt, $idx)
+            [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+            $env:ANTHROPIC_API_KEY = ""
+            $result = & $exe -p $prompt --model haiku --dangerously-skip-permissions 2>$null
+            # Return as Base64 to avoid encoding issues, with index prefix
+            $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($result))
+            "$idx|$encoded"
+        } -ArgumentList $ClaudeExe, $info.Prompt, $info.Index
+        $jobs += $job
+    }
+    
+    # Wait for all jobs (max 30 seconds)
+    $completed = $jobs | Wait-Job -Timeout 30
+    $rawResults = $completed | Receive-Job
+    $jobs | Remove-Job -Force
+    
+    # Parse results
+    foreach ($raw in $rawResults) {
+        if ($raw -match "^(\d+)\|(.+)$") {
+            $idx = [int]$matches[1]
+            $encoded = $matches[2]
+            try {
+                $decoded = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded))
+                $title = ($decoded -split "`n")[0].Trim().Trim('"').Trim("'")
+                if ($title.Length -gt 50) { $title = $title.Substring(0, 50) }
+                if ($title.Length -gt 3 -and -not ($title -match "^(I |This |The |Here |Sorry)")) {
+                    $results[$idx] = $title
+                }
+            }
+            catch { }
+        }
+    }
+    
+    return $results
+}
+
 # Generate AI summary (verbose mode for manual trigger)
 function Get-AISummary {
     param($sessionId, $filePath)
@@ -634,8 +683,96 @@ foreach ($group in $grouped) {
 # Sort final list by LastModified
 $sessions = $sessions | Sort-Object LastModified -Descending
 
-# AI title regeneration disabled for now (use S key in interactive mode)
-# TODO: Enable when performance is acceptable
+# AI title regeneration for clearly bad titles (parallel, max 5)
+$maxValidate = [Math]::Min(15, $sessions.Count)
+$badSessions = @()
+
+for ($i = 0; $i -lt $maxValidate; $i++) {
+    $session = $sessions[$i]
+    if ($session.HasCustomName) { continue }
+    
+    $title = $session.Summary
+    $needsAI = $false
+    
+    # Check for clearly bad titles
+    if (-not $title -or $title -eq "(no content)") { $needsAI = $true }
+    elseif ($title.Length -lt 8) { $needsAI = $true }
+    elseif ($title -match "^(Base directory|Error Encountered|Final Notification|skill:|Skill Definition)") { $needsAI = $true }
+    elseif ($title -match "^\[Request interrupted") { $needsAI = $true }
+    
+    if ($needsAI -and $badSessions.Count -lt 5) {
+        # Extract messages for prompt (read last 30KB for latest content)
+        $messagesText = ""
+        try {
+            $fileInfo = Get-Item $session.FilePath
+            $lines = @()
+            
+            if ($fileInfo.Length -gt 30KB) {
+                # Large file: read last 30KB
+                $stream = [System.IO.File]::Open($session.FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                $seekPos = [Math]::Max(0, $stream.Length - 30KB)
+                $stream.Seek($seekPos, [System.IO.SeekOrigin]::Begin) | Out-Null
+                $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+                $tailContent = $reader.ReadToEnd()
+                $reader.Close()
+                $stream.Close()
+                $lines = ($tailContent -split "`n") | Select-Object -Last 30
+            } else {
+                # Small file: read all and take last 30
+                $allLines = Get-Content $session.FilePath -Encoding UTF8 -ErrorAction SilentlyContinue
+                $lines = $allLines | Select-Object -Last 30
+            }
+            
+            foreach ($line in $lines) {
+                try {
+                    $entry = $line | ConvertFrom-Json -ErrorAction SilentlyContinue
+                    if ($entry.isMeta) { continue }
+                    if ($entry.message -and $entry.message.content) {
+                        $role = $entry.message.role
+                        $content = $entry.message.content
+                        $textContent = ""
+                        if ($content -is [string]) {
+                            if ($content -notmatch "tool_result|tool_use_id") {
+                                $textContent = $content
+                            }
+                        } elseif ($content -is [array]) {
+                            foreach ($item in $content) {
+                                if ($item.type -eq "text" -and $item.text -and $item.text.Length -gt 10) {
+                                    if ($item.text -notmatch "^Base directory for|ARGUMENTS:") {
+                                        $textContent = $item.text
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                        if ($textContent.Length -gt 10 -and $textContent.Length -lt 500) {
+                            $messagesText += " $textContent"
+                            if ($messagesText.Length -gt 400) { break }
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        
+        if ($messagesText.Length -gt 10) {
+            if ($messagesText.Length -gt 300) { $messagesText = $messagesText.Substring(0, 300) }
+            $prompt = "Create a short title (10-30 chars) in Japanese describing this coding session. Output ONLY the title. Content: $messagesText"
+            $badSessions += @{ Index = $i; FilePath = $session.FilePath; Prompt = $prompt }
+        } else {
+        }
+    }
+}
+
+if ($badSessions.Count -gt 0) {
+    Write-Host "  Generating AI titles for $($badSessions.Count) sessions (parallel)..." -ForegroundColor Yellow
+    $aiTitles = Get-AITitlesParallel -sessionInfos $badSessions
+    foreach ($idx in $aiTitles.Keys) {
+        $sessions[$idx].Summary = $aiTitles[$idx]
+        Write-Host "  -> Session $idx`: $($aiTitles[$idx])" -ForegroundColor Cyan
+    }
+}
 
 $duplicateCount = $script:duplicateFiles.Count
 if ($duplicateCount -gt 0) {
