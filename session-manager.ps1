@@ -354,13 +354,25 @@ foreach ($projectDir in $projectDirs) {
             if (-not $firstLine) { continue }
 
             $data = $firstLine | ConvertFrom-Json -ErrorAction Stop
-            if (-not $data.sessionId) { continue }
 
-            # Get default summary from first message
+            # Get session ID (from first line or filename for compacted sessions)
+            $sessionId = $null
+            if ($data.sessionId) {
+                $sessionId = $data.sessionId
+            } else {
+                $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($jsonFile.Name)
+            }
+            if (-not $sessionId) { continue }
+
+            # Get default summary from first message or summary field
             $defaultSummary = "(no content)"
             if ($data.message -and $data.message.content -and $data.message.content -is [string]) {
                 $len = [Math]::Min(40, $data.message.content.Length)
                 $defaultSummary = $data.message.content.Substring(0, $len) -replace "`n", " "
+            } elseif ($data.summary) {
+                # For compacted sessions, use the summary field
+                $len = [Math]::Min(40, $data.summary.Length)
+                $defaultSummary = $data.summary.Substring(0, $len)
             }
 
             # Skip warmup and empty sessions
@@ -369,16 +381,16 @@ foreach ($projectDir in $projectDirs) {
             }
 
             # Get display name (custom name or default)
-            $displayName = Get-SessionDisplayName -sessionId $data.sessionId -defaultSummary $defaultSummary -names $sessionNames
+            $displayName = Get-SessionDisplayName -sessionId $sessionId -defaultSummary $defaultSummary -names $sessionNames
 
             # Check if has custom name
             $hasCustomName = $false
-            if ($sessionNames.sessions.($data.sessionId) -and $sessionNames.sessions.($data.sessionId).name) {
+            if ($sessionNames.sessions.$sessionId -and $sessionNames.sessions.$sessionId.name) {
                 $hasCustomName = $true
             }
 
             $allSessions += [PSCustomObject]@{
-                SessionId = $data.sessionId
+                SessionId = $sessionId
                 Summary = $displayName
                 DefaultSummary = $defaultSummary
                 LastModified = $jsonFile.LastWriteTime
