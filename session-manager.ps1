@@ -365,15 +365,16 @@ foreach ($projectDir in $projectDirs) {
             }
             if (-not $sessionId) { continue }
 
-            # Get default summary from first message or summary field
-            $defaultSummary = "(no content)"
-            if ($data.message -and $data.message.content -and $data.message.content -is [string]) {
-                $len = [Math]::Min(40, $data.message.content.Length)
-                $defaultSummary = $data.message.content.Substring(0, $len) -replace "`n", " "
-            } elseif ($data.summary) {
-                # For compacted sessions, use the summary field
-                $len = [Math]::Min(40, $data.summary.Length)
-                $defaultSummary = $data.summary.Substring(0, $len)
+            # Get default summary using smart extraction (newest messages first, skip NG words)
+            $defaultSummary = Get-QuickTitle -filePath $jsonFile.FullName
+            if (-not $defaultSummary) {
+                # Fallback for compacted sessions with summary field
+                if ($data.summary) {
+                    $len = [Math]::Min(40, $data.summary.Length)
+                    $defaultSummary = $data.summary.Substring(0, $len)
+                } else {
+                    $defaultSummary = "(no content)"
+                }
             }
 
             # Skip warmup and empty sessions
