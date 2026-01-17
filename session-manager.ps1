@@ -1,5 +1,6 @@
 param(
-    [string]$Command = "interactive"
+    [string]$Command = "interactive",
+    [switch]$NoAutoSummary  # Skip auto-summarization
 )
 
 # Session names database
@@ -38,38 +39,12 @@ function Get-SessionDisplayName {
     return $defaultSummary
 }
 
-# Generate AI summary for a session
-function Get-AISummary {
-    param($sessionId)
+# Generate AI summary for a session (silent mode for batch processing)
+function Get-AISummaryQuiet {
+    param($sessionId, $filePath)
 
-    Write-Host ""
-    Write-Host "Generating AI summary..." -ForegroundColor Yellow
-
-    # Find session file
-    $sessionFile = $null
-    $projectDirs = Get-ChildItem -Path $ProjectsDir -Directory -ErrorAction SilentlyContinue
-    foreach ($projectDir in $projectDirs) {
-        $files = Get-ChildItem -Path $projectDir.FullName -Filter "*.jsonl" -ErrorAction SilentlyContinue
-        foreach ($file in $files) {
-            $firstLine = Get-Content $file.FullName -TotalCount 1 -ErrorAction SilentlyContinue
-            if ($firstLine) {
-                $data = $firstLine | ConvertFrom-Json -ErrorAction SilentlyContinue
-                if ($data.sessionId -eq $sessionId) {
-                    $sessionFile = $file.FullName
-                    break
-                }
-            }
-        }
-        if ($sessionFile) { break }
-    }
-
-    if (-not $sessionFile) {
-        Write-Host "Session file not found" -ForegroundColor Red
-        return $null
-    }
-
-    # Extract user messages (first 20 lines for summary)
-    $lines = Get-Content $sessionFile -TotalCount 50 -ErrorAction SilentlyContinue
+    # Extract user messages
+    $lines = Get-Content $filePath -TotalCount 50 -ErrorAction SilentlyContinue
     $userMessages = @()
     foreach ($line in $lines) {
         try {
@@ -85,7 +60,6 @@ function Get-AISummary {
     }
 
     if ($userMessages.Count -eq 0) {
-        Write-Host "No user messages found" -ForegroundColor Red
         return $null
     }
 
@@ -95,22 +69,38 @@ function Get-AISummary {
 
     # Call claude -p for summarization
     try {
-        $env:ANTHROPIC_API_KEY = ""  # Clear to use default auth
+        $env:ANTHROPIC_API_KEY = ""
         $summary = & $ClaudeExe -p $prompt --dangerously-skip-permissions 2>$null
         if ($summary) {
             $summary = $summary.Trim()
             if ($summary.Length -gt 50) {
                 $summary = $summary.Substring(0, 50)
             }
-            Write-Host "Summary: $summary" -ForegroundColor Green
             return $summary
         }
     }
-    catch {
-        Write-Host "Error generating summary: $($_.Exception.Message)" -ForegroundColor Red
-    }
+    catch { }
 
     return $null
+}
+
+# Generate AI summary (verbose mode for manual trigger)
+function Get-AISummary {
+    param($sessionId, $filePath)
+
+    Write-Host ""
+    Write-Host "Generating AI summary..." -ForegroundColor Yellow
+
+    $summary = Get-AISummaryQuiet -sessionId $sessionId -filePath $filePath
+
+    if ($summary) {
+        Write-Host "Summary: $summary" -ForegroundColor Green
+    }
+    else {
+        Write-Host "Failed to generate summary" -ForegroundColor Red
+    }
+
+    return $summary
 }
 
 Write-Host "=== Claude Session Manager ===" -ForegroundColor Cyan
@@ -179,6 +169,53 @@ $sessions = $sessions | Sort-Object LastModified -Descending | Select-Object -Un
 
 Write-Host "Found $($sessions.Count) sessions" -ForegroundColor Green
 
+# Auto-summarize unnamed sessions on startup
+if (-not $NoAutoSummary -and $Command -eq "interactive") {
+    $unnamedSessions = @($sessions | Where-Object { -not $_.HasCustomName } | Select-Object -First 10)
+
+    if ($unnamedSessions.Count -gt 0) {
+        Write-Host ""
+        Write-Host "Auto-summarizing $($unnamedSessions.Count) unnamed sessions..." -ForegroundColor Yellow
+        Write-Host "(Use -NoAutoSummary to skip this)" -ForegroundColor Gray
+
+        $count = 0
+        foreach ($session in $unnamedSessions) {
+            $count++
+            Write-Host "  [$count/$($unnamedSessions.Count)] $($session.SessionId.Substring(0,8))... " -NoNewline
+
+            $summary = Get-AISummaryQuiet -sessionId $session.SessionId -filePath $session.FilePath
+
+            if ($summary) {
+                # Save to names database
+                if (-not $sessionNames.sessions) {
+                    $sessionNames.sessions = @{}
+                }
+                $sessionNames.sessions.($session.SessionId) = @{
+                    name = $summary
+                    updatedAt = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss")
+                    type = "ai-auto"
+                }
+
+                # Update session object
+                $session.Summary = $summary
+                $session.HasCustomName = $true
+
+                Write-Host $summary -ForegroundColor Green
+            }
+            else {
+                Write-Host "(skipped)" -ForegroundColor Gray
+            }
+        }
+
+        # Save all names at once
+        Save-SessionNames -names $sessionNames
+
+        Write-Host ""
+        Write-Host "Auto-summarization complete!" -ForegroundColor Green
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 if ($Command -eq "interactive" -and $sessions.Count -gt 0) {
     $selectedIndex = 0
     $maxDisplay = [Math]::Min(15, $sessions.Count)
@@ -203,7 +240,7 @@ if ($Command -eq "interactive" -and $sessions.Count -gt 0) {
         }
 
         Write-Host ""
-        Write-Host "[Up/Down] Move  [Enter] Resume  [S] AI Summary  [N] Name  [Q] Quit" -ForegroundColor Gray
+        Write-Host "[Up/Down] Move  [Enter] Resume  [S] Re-summarize  [N] Name  [Q] Quit" -ForegroundColor Gray
 
         $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 
@@ -217,11 +254,10 @@ if ($Command -eq "interactive" -and $sessions.Count -gt 0) {
                 & $ClaudeExe -r $selected.SessionId
                 return
             }
-            83 {  # S - AI Summary
+            83 {  # S - Re-summarize
                 $selected = $sessions[$selectedIndex]
-                $summary = Get-AISummary -sessionId $selected.SessionId
+                $summary = Get-AISummary -sessionId $selected.SessionId -filePath $selected.FilePath
                 if ($summary) {
-                    # Save to names database
                     if (-not $sessionNames.sessions) {
                         $sessionNames.sessions = @{}
                     }
@@ -231,11 +267,8 @@ if ($Command -eq "interactive" -and $sessions.Count -gt 0) {
                         type = "ai"
                     }
                     Save-SessionNames -names $sessionNames
-
-                    # Update display
                     $sessions[$selectedIndex].Summary = $summary
                     $sessions[$selectedIndex].HasCustomName = $true
-
                     Write-Host "Saved! Press any key..." -ForegroundColor Green
                     $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
                 }
@@ -256,8 +289,6 @@ if ($Command -eq "interactive" -and $sessions.Count -gt 0) {
                     if ($newName.Length -gt 50) {
                         $newName = $newName.Substring(0, 50)
                     }
-
-                    # Save to names database
                     if (-not $sessionNames.sessions) {
                         $sessionNames.sessions = @{}
                     }
@@ -267,11 +298,8 @@ if ($Command -eq "interactive" -and $sessions.Count -gt 0) {
                         type = "manual"
                     }
                     Save-SessionNames -names $sessionNames
-
-                    # Update display
                     $sessions[$selectedIndex].Summary = $newName
                     $sessions[$selectedIndex].HasCustomName = $true
-
                     Write-Host "Saved!" -ForegroundColor Green
                     Start-Sleep -Milliseconds 500
                 }
@@ -281,9 +309,8 @@ if ($Command -eq "interactive" -and $sessions.Count -gt 0) {
                 $char = $key.Character.ToString().ToLower()
                 if ($char -eq 'q') { return }
                 if ($char -eq 's') {
-                    # Trigger S key action
                     $selected = $sessions[$selectedIndex]
-                    $summary = Get-AISummary -sessionId $selected.SessionId
+                    $summary = Get-AISummary -sessionId $selected.SessionId -filePath $selected.FilePath
                     if ($summary) {
                         if (-not $sessionNames.sessions) {
                             $sessionNames.sessions = @{}
@@ -305,7 +332,6 @@ if ($Command -eq "interactive" -and $sessions.Count -gt 0) {
                     }
                 }
                 if ($char -eq 'n') {
-                    # Trigger N key action
                     $selected = $sessions[$selectedIndex]
                     Write-Host ""
                     Write-Host "Current: $($selected.Summary)" -ForegroundColor Yellow
