@@ -297,6 +297,26 @@ function Get-QuickTitle {
     return $null
 }
 
+# Fix garbled text (Shift-JIS misencoded as UTF-8)
+function Repair-GarbledText {
+    param([string]$text)
+    
+    # Check if text looks garbled (contains typical mojibake patterns)
+    if ($text -match "縺|繧|繝|邵|郢|驛") {
+        try {
+            $sjis = [System.Text.Encoding]::GetEncoding("shift_jis")
+            $utf8 = [System.Text.Encoding]::UTF8
+            $bytes = $sjis.GetBytes($text)
+            $fixed = $utf8.GetString($bytes)
+            # Return fixed if it looks more like Japanese
+            if ($fixed -match "[あ-んア-ン一-龯]" -and $fixed -notmatch "縺|繧|繝") {
+                return $fixed
+            }
+        } catch { }
+    }
+    return $text
+}
+
 # Generate AI summary for a session (used by manual S key only)
 function Get-AISummaryQuiet {
     param($sessionId, $filePath)
@@ -332,7 +352,7 @@ function Get-AISummaryQuiet {
 
     try {
         $env:ANTHROPIC_API_KEY = ""
-        $result = & $ClaudeExe -p $prompt --model haiku --dangerously-skip-permissions 2>$null
+        $result = & $ClaudeExe -p $prompt --model haiku --dangerously-skip-permissions --setting-sources "local" 2>$null
         if ($result) {
             $summary = ($result -split "`n")[0].Trim().Trim('"').Trim("'")
             if ($summary.Length -gt 55) {
@@ -364,7 +384,7 @@ function Get-ValidatedTitle {
     
     try {
         $env:ANTHROPIC_API_KEY = ""
-        $result = & $ClaudeExe -p $validationPrompt --model haiku --dangerously-skip-permissions 2>$null
+        $result = & $ClaudeExe -p $validationPrompt --model haiku --dangerously-skip-permissions --setting-sources "local" 2>$null
         $answer = ($result -split "`n")[0].Trim().ToUpper()
         
         if ($answer -match "^YES") {
@@ -454,7 +474,7 @@ function Get-AIGeneratedTitle {
     
     try {
         $env:ANTHROPIC_API_KEY = ""
-        $result = & $ClaudeExe -p $prompt --model haiku --dangerously-skip-permissions 2>$null
+        $result = & $ClaudeExe -p $prompt --model haiku --dangerously-skip-permissions --setting-sources "local" 2>$null
         if ($result) {
             $title = ($result -split "`n")[0].Trim().Trim('"').Trim("'")
             if ($title.Length -gt 50) { $title = $title.Substring(0, 50) }
@@ -471,32 +491,52 @@ function Get-AIGeneratedTitle {
 
 # Parallel AI title generation for multiple sessions (fast)
 function Get-AITitlesParallel {
-    param($sessionInfos)  # Array of @{Index; FilePath; Prompt}
+    param($sessionInfos)  # Array of @{Index; FilePath; Prompt; ContextText}
     
     if ($sessionInfos.Count -eq 0) { return @{} }
     
     $ClaudeExe = "$env:USERPROFILE\.bun\bin\claude.exe"
+    $TempDir = "$env:TEMP\claude-session-manager"
+    if (-not (Test-Path $TempDir)) { New-Item -ItemType Directory -Path $TempDir -Force | Out-Null }
     $results = @{}
+    
+    # Write context files first (file I/O approach to avoid encoding issues)
+    $contextFiles = @{}
+    foreach ($info in $sessionInfos) {
+        $contextFile = "$TempDir\context_$($info.Index).txt"
+        # Write as UTF-8 with BOM for reliable encoding
+        [System.IO.File]::WriteAllText($contextFile, $info.ContextText, [System.Text.Encoding]::UTF8)
+        $contextFiles[$info.Index] = $contextFile
+    }
     
     # Start all jobs in parallel
     $jobs = @()
     foreach ($info in $sessionInfos) {
+        $contextFile = $contextFiles[$info.Index]
         $job = Start-Job -ScriptBlock {
-            param($exe, $prompt, $idx)
+            param($exe, $contextFile, $idx)
             [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
             $env:ANTHROPIC_API_KEY = ""
-            $result = & $exe -p $prompt --model haiku --dangerously-skip-permissions 2>$null
+            # Read context from file (preserves encoding)
+            $context = [System.IO.File]::ReadAllText($contextFile, [System.Text.Encoding]::UTF8)
+            $prompt = "TASK: Create a 25-50 char Japanese title for this session. Describe what the user asked or discussed. Be SPECIFIC. Output ONLY the title, no quotes. SESSION: $context"
+            $result = & $exe -p $prompt --model haiku --dangerously-skip-permissions --setting-sources "local" 2>$null
             # Return as Base64 to avoid encoding issues, with index prefix
             $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($result))
             "$idx|$encoded"
-        } -ArgumentList $ClaudeExe, $info.Prompt, $info.Index
+        } -ArgumentList $ClaudeExe, $contextFile, $info.Index
         $jobs += $job
     }
     
-    # Wait for all jobs (max 30 seconds)
-    $completed = $jobs | Wait-Job -Timeout 30
+    # Wait for all jobs (max 10 minutes for up to 10 sessions)
+    $completed = $jobs | Wait-Job -Timeout 600
     $rawResults = $completed | Receive-Job
     $jobs | Remove-Job -Force
+    
+    # Cleanup temp files
+    foreach ($file in $contextFiles.Values) {
+        Remove-Item $file -Force -ErrorAction SilentlyContinue
+    }
     
     # Parse results
     foreach ($raw in $rawResults) {
@@ -629,6 +669,11 @@ foreach ($projectDir in $projectDirs) {
             if ($defaultSummary -match "^(no content|Warmup|\(no content\)|Create a short title|このコーディングセッション)") {
                 continue
             }
+            
+            # Skip garbled sessions (created by headless -p mode encoding bug)
+            if ($defaultSummary -match "医N繧|縺薙・繧|繧ｳ繝ｼ繝|郢ｧ・ｳ|邵ｺ阮") {
+                continue
+            }
 
             # Skip very small sessions (likely warmup or AI prompt sessions)
             if ($jsonFile.Length -lt 5000) {
@@ -683,95 +728,123 @@ foreach ($group in $grouped) {
 # Sort final list by LastModified
 $sessions = $sessions | Sort-Object LastModified -Descending
 
-# AI title regeneration for clearly bad titles (parallel, max 5)
+# Load cached AI titles
+$titleCachePath = "$env:USERPROFILE\.claude\session-titles-cache.json"
+$titleCache = @{}
+if (Test-Path $titleCachePath) {
+    try {
+        $titleCache = Get-Content $titleCachePath -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable
+    } catch { $titleCache = @{} }
+}
+
+# Apply cached titles first
+foreach ($session in $sessions) {
+    $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($session.FilePath)
+    if ($titleCache.ContainsKey($sessionId)) {
+        $session.Summary = $titleCache[$sessionId]
+    }
+}
+
+# AI title validation for top 15 sessions (LLM judges if title is good)
 $maxValidate = [Math]::Min(15, $sessions.Count)
-$badSessions = @()
+$sessionsToValidate = @()
 
 for ($i = 0; $i -lt $maxValidate; $i++) {
     $session = $sessions[$i]
     if ($session.HasCustomName) { continue }
     
-    $title = $session.Summary
-    $needsAI = $false
+    # Skip if already has cached title
+    $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($session.FilePath)
+    if ($titleCache.ContainsKey($sessionId)) { continue }
     
-    # Check for clearly bad titles
-    if (-not $title -or $title -eq "(no content)") { $needsAI = $true }
-    elseif ($title.Length -lt 8) { $needsAI = $true }
-    elseif ($title -match "^(Base directory|Error Encountered|Final Notification|skill:|Skill Definition)") { $needsAI = $true }
-    elseif ($title -match "^\[Request interrupted") { $needsAI = $true }
-    
-    if ($needsAI -and $badSessions.Count -lt 5) {
-        # Extract messages for prompt (read last 30KB for latest content)
-        $messagesText = ""
-        try {
-            $fileInfo = Get-Item $session.FilePath
-            $lines = @()
-            
-            if ($fileInfo.Length -gt 30KB) {
-                # Large file: read last 30KB
-                $stream = [System.IO.File]::Open($session.FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-                $seekPos = [Math]::Max(0, $stream.Length - 30KB)
-                $stream.Seek($seekPos, [System.IO.SeekOrigin]::Begin) | Out-Null
-                $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
-                $tailContent = $reader.ReadToEnd()
-                $reader.Close()
-                $stream.Close()
-                $lines = ($tailContent -split "`n") | Select-Object -Last 30
-            } else {
-                # Small file: read all and take last 30
-                $allLines = Get-Content $session.FilePath -Encoding UTF8 -ErrorAction SilentlyContinue
-                $lines = $allLines | Select-Object -Last 30
-            }
-            
-            foreach ($line in $lines) {
-                try {
-                    $entry = $line | ConvertFrom-Json -ErrorAction SilentlyContinue
-                    if ($entry.isMeta) { continue }
-                    if ($entry.message -and $entry.message.content) {
-                        $role = $entry.message.role
-                        $content = $entry.message.content
-                        $textContent = ""
-                        if ($content -is [string]) {
-                            if ($content -notmatch "tool_result|tool_use_id") {
-                                $textContent = $content
-                            }
-                        } elseif ($content -is [array]) {
-                            foreach ($item in $content) {
-                                if ($item.type -eq "text" -and $item.text -and $item.text.Length -gt 10) {
-                                    if ($item.text -notmatch "^Base directory for|ARGUMENTS:") {
-                                        $textContent = $item.text
-                                        break
-                                    }
+    # Extract first 30 + last 30 lines for context
+    $contextText = ""
+    try {
+        $allLines = Get-Content $session.FilePath -Encoding UTF8 -ErrorAction SilentlyContinue
+        $firstLines = $allLines | Select-Object -First 30
+        $lastLines = $allLines | Select-Object -Last 30
+        $combinedLines = @($firstLines) + @($lastLines) | Select-Object -Unique
+        
+        foreach ($line in $combinedLines) {
+            try {
+                $entry = $line | ConvertFrom-Json -ErrorAction SilentlyContinue
+                if ($entry.isMeta) { continue }
+                if ($entry.message -and $entry.message.content) {
+                    $content = $entry.message.content
+                    $textContent = ""
+                    if ($content -is [string]) {
+                        if ($content -notmatch "tool_result|tool_use_id|This session is being continued from a previous conversation") {
+                            $textContent = $content
+                        }
+                    } elseif ($content -is [array]) {
+                        foreach ($item in $content) {
+                            if ($item.type -eq "text" -and $item.text -and $item.text.Length -gt 10) {
+                                if ($item.text -notmatch "^Base directory for|ARGUMENTS:|user-prompt-submit-hook|This session is being continued from a previous conversation") {
+                                    $textContent = $item.text
+                                    break
                                 }
                             }
                         }
-                        if ($textContent.Length -gt 10 -and $textContent.Length -lt 500) {
-                            $messagesText += " $textContent"
-                            if ($messagesText.Length -gt 400) { break }
-                        }
+                    }
+                    if ($textContent.Length -gt 10 -and $textContent.Length -lt 300) {
+                        # Fix garbled text if detected
+                        $textContent = Repair-GarbledText -text $textContent
+                        $contextText += " $textContent"
+                        if ($contextText.Length -gt 600) { break }
                     }
                 }
-                catch { }
             }
+            catch { }
         }
-        catch { }
-        
-        if ($messagesText.Length -gt 10) {
-            if ($messagesText.Length -gt 300) { $messagesText = $messagesText.Substring(0, 300) }
-            $prompt = "Create a short title (10-30 chars) in Japanese describing this coding session. Output ONLY the title. Content: $messagesText"
-            $badSessions += @{ Index = $i; FilePath = $session.FilePath; Prompt = $prompt }
+    }
+    catch { }
+    
+    if ($contextText.Length -gt 20) {
+        # Check if content is just session end/hook related
+        if ($contextText -match "^[\s]*(セッション(が|を)?(終了|開始)|報告(完了|を)|GitHub Issue|Stop|hook)" -and $contextText.Length -lt 200) {
+            $sessions[$i].Summary = "(Hook自動処理)"
+            $titleCache[$sessionId] = "(Hook自動処理)"
         } else {
+            if ($contextText.Length -gt 500) { $contextText = $contextText.Substring(0, 500) }
+            $currentTitle = $session.Summary
+            $sessionsToValidate += @{ Index = $i; FilePath = $session.FilePath; ContextText = $contextText; CurrentTitle = $currentTitle }
+        }
+    } else {
+        # Very little content - skip AI title generation (keep original)
+        $lineCount = (Get-Content $session.FilePath -Encoding UTF8 -ErrorAction SilentlyContinue).Count
+        if ($lineCount -lt 20) {
+            # Small sessions (< 20 lines) don't need AI summarization
         }
     }
 }
 
-if ($badSessions.Count -gt 0) {
-    Write-Host "  Generating AI titles for $($badSessions.Count) sessions (parallel)..." -ForegroundColor Yellow
-    $aiTitles = Get-AITitlesParallel -sessionInfos $badSessions
-    foreach ($idx in $aiTitles.Keys) {
-        $sessions[$idx].Summary = $aiTitles[$idx]
-        Write-Host "  -> Session $idx`: $($aiTitles[$idx])" -ForegroundColor Cyan
+if ($sessionsToValidate.Count -gt 0) {
+    Write-Host "  Validating $($sessionsToValidate.Count) session titles with AI..." -ForegroundColor Yellow
+    $aiResults = Get-AITitlesParallel -sessionInfos $sessionsToValidate
+    $cacheUpdated = $false
+    foreach ($idx in $aiResults.Keys) {
+        $result = $aiResults[$idx]
+        # Truncate if too long (allow up to 60 chars for more descriptive titles)
+        if ($result.Length -gt 60) { $result = $result.Substring(0, 60) }
+        # Only use if it's a reasonable title (filter out error messages, apologies, generic titles, and markdown)
+        if ($result.Length -gt 5 -and $result -notmatch "(セッション概要|Session|タイトル|title|現在|OK|了解|申し訳|すみません|#|##|\*\*|セッション終了|セッション完了|コーディング作業が|タスクは完了していません|作成することができません|記録されていない|待機中|準備完了|指示待ち|依頼待ち)") {
+            $sessions[$idx].Summary = $result
+            # Save to cache
+            $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($sessions[$idx].FilePath)
+            $titleCache[$sessionId] = $result
+            $cacheUpdated = $true
+            Write-Host "  -> Session $idx`: $result" -ForegroundColor Cyan
+        }
     }
+    # Save updated cache
+    if ($cacheUpdated) {
+        $titleCache | ConvertTo-Json | Set-Content $titleCachePath -Encoding UTF8
+    }
+}
+
+# Also save cache if hook sessions were detected
+if ($titleCache.Count -gt 0) {
+    $titleCache | ConvertTo-Json | Set-Content $titleCachePath -Encoding UTF8
 }
 
 $duplicateCount = $script:duplicateFiles.Count
