@@ -55,86 +55,120 @@ function Get-SessionDisplayName {
     return $defaultSummary
 }
 
-# Quick fallback title from assistant responses (no API call - instant)
-# Looks at recent assistant responses which tend to summarize the topic better
+# Quick fallback title from session content (no API call - instant)
 function Get-QuickTitle {
     param($filePath)
 
-    # Read last 100 lines to get recent messages
-    $allLines = Get-Content $filePath -Encoding UTF8 -ErrorAction SilentlyContinue
+    # Read file with encoding fallback
+    $allLines = $null
+    try {
+        $allLines = Get-Content $filePath -Encoding UTF8 -ErrorAction Stop
+    }
+    catch {
+        try {
+            $allLines = Get-Content $filePath -ErrorAction SilentlyContinue
+        }
+        catch { return $null }
+    }
     if (-not $allLines -or $allLines.Count -eq 0) { return $null }
+
+    # Patterns to skip (conversational/status responses, not topic descriptions)
+    $skipPatterns = @(
+        "^(完了|了解|承知|はい|OK|おっけ|報告|確認|修正|対応|実行|テスト|チェック)",
+        "^(Hi|Hello|Sure|OK|Done|Fixed|Completed|Let me|I'll|I will)",
+        "^(そうだね|なるほど|いいね|ありがと|お疲れ|よし|では)",
+        "♪|♡|🎯|##\s*(完了|修正|実行|確認|報告|レビュー結果)"
+    )
+    $skipRegex = ($skipPatterns -join "|")
 
     # Get last 100 lines (most recent)
     $recentLines = $allLines | Select-Object -Last 100
 
-    # Collect assistant responses (in reverse order - newest first)
-    $assistantResponses = @()
+    # First: Look for markdown headers in assistant responses (## Topic)
     for ($i = $recentLines.Count - 1; $i -ge 0; $i--) {
         try {
             $entry = $recentLines[$i] | ConvertFrom-Json -ErrorAction SilentlyContinue
             if ($entry.message -and $entry.message.role -eq "assistant" -and $entry.message.content) {
-                $content = $entry.message.content
-                # Handle array content (tool calls etc)
-                if ($content -is [array]) {
-                    foreach ($item in $content) {
-                        if ($item.type -eq "text" -and $item.text) {
-                            $assistantResponses += $item.text
-                            break
+                $content = if ($entry.message.content -is [array]) {
+                    ($entry.message.content | Where-Object { $_.type -eq "text" } | Select-Object -First 1).text
+                } else { $entry.message.content }
+
+                if ($content -and $content -match "##\s+(.+?)(\r?\n|$)") {
+                    $header = $matches[1].Trim()
+                    # Skip status headers
+                    if ($header -notmatch "^(完了|修正|確認|報告|レビュー|実行|テスト|サマリー|結果)") {
+                        if ($header.Length -gt 5 -and $header.Length -lt 50) {
+                            return $header
                         }
                     }
-                }
-                elseif ($content -is [string] -and $content.Length -gt 10) {
-                    $assistantResponses += $content
                 }
             }
         }
         catch { }
-
-        # Stop after collecting 3 assistant responses
-        if ($assistantResponses.Count -ge 3) { break }
     }
 
-    # Try to extract title from assistant responses
-    foreach ($response in $assistantResponses) {
-        # Clean up
-        $text = $response -replace "`n", " " -replace "\s+", " "
+    # Second: Look at recent USER messages (what the user asked for)
+    $userMessages = @()
+    for ($i = $recentLines.Count - 1; $i -ge 0; $i--) {
+        try {
+            $entry = $recentLines[$i] | ConvertFrom-Json -ErrorAction SilentlyContinue
+            if ($entry.message -and $entry.message.role -eq "user" -and $entry.message.content) {
+                $content = $entry.message.content
+                if ($content -is [string] -and $content.Length -gt 10) {
+                    $userMessages += $content
+                    if ($userMessages.Count -ge 5) { break }
+                }
+            }
+        }
+        catch { }
+    }
+
+    foreach ($msg in $userMessages) {
+        $text = $msg -replace "`n", " " -replace "\s+", " "
         $text = $text.Trim()
 
-        # Skip if too short or looks like just tool output
-        if ($text.Length -lt 15) { continue }
-        if ($text -match "^(\{|\[|<|```|Error|undefined)") { continue }
+        # Skip if too short, code, URL, or file path
+        if ($text.Length -lt 10) { continue }
+        if ($text -match "^(http|```|import |const |var |let |function |C:\\|/Users/)") { continue }
+        if ($text -match "^[`"'\[\{<]") { continue }
+        # Skip if it's a file path or screenshot
+        if ($text -match "\.(png|jpg|jpeg|gif|md|ps1|json|txt)") { continue }
 
-        # Take first meaningful sentence (up to 50 chars)
+        # Take meaningful part
         $title = $text
-        if ($title.Length -gt 50) {
-            $title = $title.Substring(0, 50)
-            # Try to break at word boundary
+        if ($title.Length -gt 45) {
+            $title = $title.Substring(0, 45)
             $lastSpace = $title.LastIndexOf(" ")
-            if ($lastSpace -gt 30) {
+            if ($lastSpace -gt 25) {
                 $title = $title.Substring(0, $lastSpace)
             }
             $title = $title + "..."
         }
 
-        # Skip if it's just greeting or generic
-        if ($title -match "^(Hi|Hello|Sure|OK|はい|了解|承知)") { continue }
+        # Skip if garbled (contains too many unusual chars)
+        if (($title -replace "[a-zA-Z0-9\u3040-\u30FF\u4E00-\u9FFF\s\-\.\,\!\?\(\)]", "").Length -gt ($title.Length / 3)) {
+            continue
+        }
 
         return $title
     }
 
-    # Fallback: first user message (last resort)
-    foreach ($line in $allLines | Select-Object -First 5) {
+    # Fallback: first user message
+    foreach ($line in $allLines | Select-Object -First 10) {
         try {
             $entry = $line | ConvertFrom-Json -ErrorAction SilentlyContinue
             if ($entry.message -and $entry.message.role -eq "user" -and $entry.message.content) {
                 $content = $entry.message.content
-                if ($content -is [string] -and $content.Length -gt 5) {
+                if ($content -is [string] -and $content.Length -gt 10) {
                     $title = $content -replace "`n", " " -replace "\s+", " "
                     $title = $title.Trim()
-                    # Skip URLs and code
-                    if ($title -match "^(http|```|import |const |var |let |function )") { continue }
+                    if ($title -match "^(http|```|import |const |var |let |function |C:\\)") { continue }
                     if ($title.Length -gt 40) {
                         $title = $title.Substring(0, 40) + "..."
+                    }
+                    # Skip garbled
+                    if (($title -replace "[a-zA-Z0-9\u3040-\u30FF\u4E00-\u9FFF\s\-\.\,\!\?\(\)]", "").Length -gt ($title.Length / 3)) {
+                        continue
                     }
                     return $title
                 }
