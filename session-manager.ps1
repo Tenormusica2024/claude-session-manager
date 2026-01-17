@@ -419,22 +419,23 @@ else {
     Write-Host "Found $($sessions.Count) sessions" -ForegroundColor Green
 }
 
-# Auto-title unnamed sessions on startup (instant - no API calls)
+# Auto-title unnamed sessions on startup using claude -p (Haiku)
 # Sessions with hook-generated names are already handled
 if (-not $NoAutoSummary -and $Command -eq "interactive") {
-    $unnamedSessions = @($sessions | Where-Object { -not $_.HasCustomName } | Select-Object -First 20)
+    $unnamedSessions = @($sessions | Where-Object { -not $_.HasCustomName } | Select-Object -First 10)
 
     if ($unnamedSessions.Count -gt 0) {
         Write-Host ""
-        Write-Host "Auto-titling $($unnamedSessions.Count) unnamed sessions..." -ForegroundColor Yellow
+        Write-Host "Summarizing $($unnamedSessions.Count) unnamed sessions with AI..." -ForegroundColor Yellow
 
         $count = 0
         $titled = 0
         foreach ($session in $unnamedSessions) {
             $count++
+            Write-Host "  [$count/$($unnamedSessions.Count)] Summarizing..." -ForegroundColor Gray -NoNewline
 
-            # Use quick title extraction (no API call - instant)
-            $title = Get-QuickTitle -filePath $session.FilePath
+            # Use claude -p with Haiku for summarization
+            $title = Get-AISummaryQuiet -sessionId $session.SessionId -filePath $session.FilePath
 
             if ($title) {
                 # Save to names database
@@ -444,20 +445,24 @@ if (-not $NoAutoSummary -and $Command -eq "interactive") {
                 $sessionNames.sessions.($session.SessionId) = @{
                     name = $title
                     updatedAt = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ss")
-                    type = "quick"
+                    type = "ai-auto"
                 }
 
                 # Update session object
                 $session.Summary = $title
                 $session.HasCustomName = $true
                 $titled++
+                Write-Host " -> $title" -ForegroundColor Green
+            }
+            else {
+                Write-Host " (skipped)" -ForegroundColor DarkGray
             }
         }
 
         # Save all names at once
         Save-SessionNames -names $sessionNames
 
-        Write-Host "Titled $titled sessions (instant)" -ForegroundColor Green
+        Write-Host "Titled $titled sessions with AI" -ForegroundColor Green
     }
 }
 
