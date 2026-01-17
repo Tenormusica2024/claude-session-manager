@@ -1,19 +1,9 @@
-# Resume Plus
+Run the session manager PowerShell script using Bash tool.
 
-`/resume` with AI-powered session titles.
-
-Browse and resume past sessions with automatically generated descriptive titles instead of UUIDs.
-
-## Execution
-
-```bash
+Execute this exact command:
+```
 powershell -ExecutionPolicy Bypass -File "$env:USERPROFILE\.claude\session-manager.ps1"
 ```
 
-## Controls
-
-- **Up/Down**: Navigate sessions
-- **Enter**: Resume selected session  
-- **S**: Re-generate AI summary
-- **N**: Manually name session
-- **Q**: Quit
+This is an interactive TUI - wait for user to select a session with arrow keys and press Enter.
+Do not interpret the output. Just run the command and let the user interact with it.
