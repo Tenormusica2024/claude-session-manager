@@ -6,7 +6,8 @@ A session manager for Claude Code that replaces UUID-based session lists with au
 
 ## What it does
 
-- Generates descriptive session titles using Claude Haiku
+- Generates descriptive session titles using Claude Sonnet
+- Automatically skips meaningless sessions (greetings, auto-reports)
 - Filters out empty and corrupted sessions
 - Provides the same arrow-key navigation as `/resume`
 - Caches titles for fast subsequent launches
@@ -15,12 +16,12 @@ A session manager for Claude Code that replaces UUID-based session lists with au
 
 ```
 === Claude Session Manager ===
-Found 117 sessions
+Found 105 sessions
 
->  [1] GitHubイシューモニター処理の「complete」誤認問題調査
-   [2] ココナラのAIエージェント競合サービス3件の説明文・特徴取得
-   [3] ココナラAI相談サービスの競合調査
-   [4] private_issue_monitor_serviceのバグ特定と修正
+>  [1] AI最新ニュースと技術動向の24時間レポート作成
+   [2] Claude Desktop連携プログラムの誤報告問題の調査
+   [3] ココナラAI関連サービスの競合価格調査
+   [4] ブログ記事のLLM性能比較内容の拡充
   *[5] My Custom Session Name
 
 [Up/Down] Move  [Enter] Resume  [S] Re-summarize  [N] Name  [Q] Quit
@@ -30,18 +31,18 @@ Found 117 sessions
 
 Requires Claude Code CLI.
 
-### Option 1: Slash Command
+### Option 1: Terminal Execution (Recommended)
 
 ```powershell
 # Download files
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tenormusica2024/claude-session-manager/main/session-manager.ps1" -OutFile "$env:USERPROFILE\.claude\session-manager.ps1"
-New-Item -ItemType Directory -Path "$env:USERPROFILE\.claude\commands" -Force
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tenormusica2024/claude-session-manager/main/commands/resume-plus.md" -OutFile "$env:USERPROFILE\.claude\commands\resume-plus.md"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tenormusica2024/claude-session-manager/main/resume-plus.cmd" -OutFile "$env:USERPROFILE\.claude\resume-plus.cmd"
+
+# Run from any terminal
+resume-plus
 ```
 
-Then use `/resume-plus` in Claude Code.
-
-### Option 2: Direct Execution
+### Option 2: Direct PowerShell
 
 ```powershell
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tenormusica2024/claude-session-manager/main/session-manager.ps1" -OutFile "$env:USERPROFILE\.claude\session-manager.ps1"
@@ -62,9 +63,10 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tenormusica2024/claude
 
 1. Scans `~/.claude/projects/` for session files
 2. Filters out empty and corrupted entries
-3. Generates titles for recent sessions using Haiku (parallel, ~10 seconds)
-4. Caches results for instant display on subsequent runs
-5. Resumes selected session via `claude -r`
+3. Generates titles for recent sessions using Sonnet (parallel, ~15 sessions)
+4. Automatically skips meaningless sessions (greetings, auto-reports)
+5. Caches results for instant display on subsequent runs
+6. Resumes selected session via `claude -r`
 
 ## Performance
 
