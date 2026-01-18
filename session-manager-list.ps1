@@ -558,29 +558,31 @@ function Get-AITitlesParallel {
             $env:ANTHROPIC_API_KEY = ""
             # Read context from file (preserves encoding)
             $context = [System.IO.File]::ReadAllText($contextFile, [System.Text.Encoding]::UTF8)
-            $prompt = "TASK: Generate a session title in Japanese (20-40 chars).
+            $prompt = "TASK: Generate a coding session title (20-40 chars).
 
 RULES:
 1. Describe the USER'S GOAL or PROBLEM (not what Claude said)
-2. Be SPECIFIC - mention tools, services, or topics discussed
+2. Be SPECIFIC - mention languages, frameworks, tools, or features
 3. Output ONLY the title - no quotes, no explanation
 4. If session has no real work (just greetings, testing, auto-reports), output: SKIP
 5. NEVER copy-paste user messages - ALWAYS summarize in your own words
 6. Title must be 20-40 chars. Longer = INVALID
+7. Match the language of session content (Japanese/English)
 
 BAD TITLES (output SKIP instead):
-- Greetings: 'こんにちは' '頑張って' 'ありがとう'
+- Greetings or thanks
 - Copy-paste of user message (even partial)
 - Sentences longer than 50 chars
-- Meta-comments about session
-- Vague: 'セッション確認' '作業完了' '実行が必須'
-- English titles when Japanese content
+- Meta-comments about session itself
+- Vague titles without specific context
 
 GOOD TITLES (concise, summarized):
-- 'ココナラ競合サービスの価格調査'
-- 'Firebase認証エラーのデバッグ'
-- 'AI最新ニュースの定期収集設定'
-- 'ブログ記事の設計と実装分担の相談'
+- 'React authentication bug fix'
+- 'Django REST API pagination'
+- 'TypeScript型定義エラーの修正'
+- 'Docker compose設定の最適化'
+- 'GitHub Actions CI/CD構築'
+- 'PostgreSQLクエリ最適化'
 
 SESSION:
 $context"
