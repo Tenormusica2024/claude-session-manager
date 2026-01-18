@@ -1060,6 +1060,13 @@ if ($Command -eq "interactive" -and $sessions.Count -gt 0) {
                 $selected = $sessions[$selectedIndex]
                 Write-Host ""
                 Write-Host "Resuming session: $($selected.SessionId)" -ForegroundColor Green
+                
+                # Set terminal tab title to session title
+                $tabTitle = $selected.Summary
+                if ($tabTitle -and $tabTitle -ne "SKIP") {
+                    $Host.UI.RawUI.WindowTitle = $tabTitle
+                }
+                
                 & $ClaudeExe -r $selected.SessionId
                 return
             }
