@@ -170,6 +170,18 @@ function Get-QuickTitle {
             "^(C:\\|/Users/|~/|\./|http)",
             # Questions that are too generic
             "^(確認していい|これでいい|どう思う|何か|ある？)$",
+            # Question/conversation patterns (not suitable as titles)
+            # Match text ending with question particles or conversational markers
+            ".*って.+\?|.*かな.?\?|.*でしょ.?\?|.*よね.?\?",
+            # Meta-commentary about the tool/process (not session topics)
+            "NGワード|NGパターン|表面的対処|一次的な対処",
+            # AI prompt leakage (prompts stored as summaries/titles)
+            "Output ONLY|Generate a|Create a|15-40 character|Japanese title|Focus on the main|The conversation is summarized",
+            # Conversational endings (not titles)
+            "だと思うよ|だよね|だね|だよ|していい|どうかな|でいいの",
+            # Process-related questions
+            "入れたの|追加したの|削除したの|修正したの|変更したの",
+            # System hooks and markers
             "^This session is being continued",
             "^<user-prompt-submit-hook>",
             "^Claude Auto-Mode loaded",
