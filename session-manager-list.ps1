@@ -51,6 +51,9 @@ if (-not $script:claudeConnected) {
 # Global: Track duplicate files for cleanup
 $script:duplicateFiles = @()
 
+# Global: Cache for file reading operations (performance optimization)
+$script:fileReadCache = @{}  # @{ FilePath = @{ Lines = @(); LineCount = int } }
+
 # Load session names (convert PSCustomObject to hashtable for dynamic property addition)
 function Get-SessionNames {
     if (Test-Path $NamesFile) {
@@ -594,54 +597,68 @@ $context"
         $jobs += $job
     }
     
-    # Wait for all jobs with timeout (max 2 minutes total)
-    $timeoutSeconds = 120
-    $completed = $jobs | Wait-Job -Timeout $timeoutSeconds
-    
-    # Check for timed out jobs
-    $timedOut = $jobs | Where-Object { $_.State -eq 'Running' }
-    if ($timedOut.Count -gt 0) {
-        Write-Host "  [WARN] $($timedOut.Count) AI title job(s) timed out" -ForegroundColor Yellow
-        $timedOut | Stop-Job
-    }
-    
-    # Get results from completed jobs, handle errors
-    $rawResults = @()
-    foreach ($job in $completed) {
-        try {
-            if ($job.State -eq 'Completed') {
-                $rawResults += Receive-Job -Job $job -ErrorAction Stop
-            } elseif ($job.State -eq 'Failed') {
-                Write-Host "  [WARN] Job failed: $($job.ChildJobs[0].JobStateInfo.Reason.Message)" -ForegroundColor Yellow
+    # Wait for jobs with early completion strategy (30sec batches)
+    # Process completed jobs as they finish instead of waiting for all
+    $batchTimeoutSeconds = 30
+    $results = @{}
+    $runningJobs = $jobs
+    $totalBatches = [Math]::Ceiling($jobs.Count / 5)  # Max 5 jobs per batch
+    $currentBatch = 0
+
+    while ($runningJobs.Count -gt 0 -and $currentBatch -lt $totalBatches) {
+        $currentBatch++
+        # Wait up to 30 seconds for any job to complete
+        $batchCompleted = $runningJobs | Wait-Job -Timeout $batchTimeoutSeconds -Any
+
+        if ($batchCompleted) {
+            # Collect results from completed jobs
+            foreach ($job in $runningJobs) {
+                if ($job.State -eq 'Completed' -or $job.State -eq 'Failed') {
+                    try {
+                        $rawResult = Receive-Job -Job $job -ErrorAction SilentlyContinue
+                        if ($rawResult) {
+                            foreach ($raw in $rawResult) {
+                                if ($raw -match "^(\d+)\|(.+)$") {
+                                    $idx = [int]$matches[1]
+                                    $encoded = $matches[2]
+                                    try {
+                                        $decoded = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded))
+                                        $title = ($decoded -split "`n")[0].Trim().Trim('"').Trim("'")
+                                        if ($title.Length -gt 50) { $title = $title.Substring(0, 50) }
+                                        if ($title.Length -gt 3 -and -not ($title -match "^(I |This |The |Here |Sorry)")) {
+                                            $results[$idx] = $title
+                                        }
+                                    } catch { }
+                                }
+                            }
+                        }
+                    } catch { }
+                    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+                }
             }
-        } catch {
-            Write-Host "  [WARN] Error receiving job result: $_" -ForegroundColor Yellow
+            # Update running jobs list
+            $runningJobs = $runningJobs | Where-Object { $_.State -eq 'Running' }
+        } else {
+            # Batch timeout - stop remaining jobs
+            $timedOut = $runningJobs | Where-Object { $_.State -eq 'Running' }
+            if ($timedOut.Count -gt 0) {
+                Write-Host "  [WARN] Batch $currentBatch`: $($timedOut.Count) job(s) timed out" -ForegroundColor Yellow
+                $timedOut | Stop-Job
+            }
+            break
         }
     }
-    $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
-    
+
+    # Final cleanup
+    foreach ($job in $runningJobs) {
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    }
+
     # Cleanup temp files
     foreach ($file in $contextFiles.Values) {
         Remove-Item $file -Force -ErrorAction SilentlyContinue
     }
-    
-    # Parse results
-    foreach ($raw in $rawResults) {
-        if ($raw -match "^(\d+)\|(.+)$") {
-            $idx = [int]$matches[1]
-            $encoded = $matches[2]
-            try {
-                $decoded = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded))
-                $title = ($decoded -split "`n")[0].Trim().Trim('"').Trim("'")
-                if ($title.Length -gt 50) { $title = $title.Substring(0, 50) }
-                if ($title.Length -gt 3 -and -not ($title -match "^(I |This |The |Here |Sorry)")) {
-                    $results[$idx] = $title
-                }
-            }
-            catch { }
-        }
-    }
-    
+
     return $results
 }
 
@@ -851,24 +868,82 @@ $maxValidate = 15
 $sessionsToValidate = @()
 $validatedCount = 0
 
+# Bad summary patterns for SKIP detection (unified check)
+$badSummaryPatterns = @(
+    "^画面表示",
+    "^実行が必須",
+    "^お、",
+    "^もう記事",
+    "^GitHub Task",
+    "^Bash Hooks",
+    "^\w+\.\w+ AI",
+    "^AI News Research",
+    "^[A-Z][a-z]+ [A-Z][a-z]+ (and|with|for)",
+    "✅.*✅"
+)
+
 for ($i = 0; $i -lt $sessions.Count -and $validatedCount -lt $maxValidate; $i++) {
     $session = $sessions[$i]
     if ($session.HasCustomName) { continue }
-    
+
     # Skip if already has cached title
     $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($session.FilePath)
     if ($titleCache.ContainsKey($sessionId)) { continue }
-    
+
     $validatedCount++
-    
-    # Extract first 30 + last 30 lines for context
+
+    # Extract first 30 + last 30 lines for context (with caching)
     $contextText = ""
+    $lineCount = 0
+
+    # Check cache first (performance optimization)
+    if ($script:fileReadCache.ContainsKey($session.FilePath)) {
+        $cached = $script:fileReadCache[$session.FilePath]
+        $allLines = $cached.Lines
+        $lineCount = $cached.LineCount
+    } else {
+        # Read file and cache the result
+        try {
+            $allLines = Get-Content $session.FilePath -Encoding UTF8 -ErrorAction SilentlyContinue
+            $lineCount = $allLines.Count
+            # Cache for potential reuse
+            $script:fileReadCache[$session.FilePath] = @{
+                Lines = $allLines
+                LineCount = $lineCount
+            }
+        } catch {
+            $allLines = @()
+            $lineCount = 0
+        }
+    }
+
+    # First SKIP check: line count (unified with pattern check)
+    if ($lineCount -lt 20) {
+        $titleCache[$sessionId] = "SKIP"
+        $sessions[$i].Summary = "SKIP"
+        $cacheUpdated = $true
+        continue
+    }
+
+    # Second SKIP check: bad summary patterns (unified here)
+    $shouldSkip = $false
+    foreach ($pattern in $badSummaryPatterns) {
+        if ($session.Summary -match $pattern) {
+            $titleCache[$sessionId] = "SKIP"
+            $sessions[$i].Summary = "SKIP"
+            $cacheUpdated = $true
+            $shouldSkip = $true
+            break
+        }
+    }
+    if ($shouldSkip) { continue }
+
+    # Extract context for AI validation
     try {
-        $allLines = Get-Content $session.FilePath -Encoding UTF8 -ErrorAction SilentlyContinue
         $firstLines = $allLines | Select-Object -First 30
         $lastLines = $allLines | Select-Object -Last 30
         $combinedLines = @($firstLines) + @($lastLines) | Select-Object -Unique
-        
+
         foreach ($line in $combinedLines) {
             try {
                 $entry = $line | ConvertFrom-Json -ErrorAction SilentlyContinue
@@ -902,7 +977,7 @@ for ($i = 0; $i -lt $sessions.Count -and $validatedCount -lt $maxValidate; $i++)
         }
     }
     catch { }
-    
+
     if ($contextText.Length -gt 20) {
         # Check if content is just session end/hook related
         if ($contextText -match "^[\s]*(セッション(が|を)?(終了|開始)|報告(完了|を)|GitHub Issue|Stop|hook)" -and $contextText.Length -lt 200) {
@@ -912,42 +987,6 @@ for ($i = 0; $i -lt $sessions.Count -and $validatedCount -lt $maxValidate; $i++)
             if ($contextText.Length -gt 500) { $contextText = $contextText.Substring(0, 500) }
             $currentTitle = $session.Summary
             $sessionsToValidate += @{ Index = $i; FilePath = $session.FilePath; ContextText = $contextText; CurrentTitle = $currentTitle }
-        }
-    } else {
-        # Very little content - mark as SKIP if default summary looks like copy-paste
-        $lineCount = (Get-Content $session.FilePath -Encoding UTF8 -ErrorAction SilentlyContinue).Count
-        if ($lineCount -lt 20) {
-            $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($session.FilePath)
-            $titleCache[$sessionId] = "SKIP"
-            $sessions[$i].Summary = "SKIP"
-            $cacheUpdated = $true
-        }
-    }
-}
-
-# Also filter out sessions with bad default summaries (copy-paste detection)
-$badSummaryPatterns = @(
-    "^画面表示",
-    "^実行が必須",
-    "^お、",
-    "^もう記事",
-    "^GitHub Task",
-    "^Bash Hooks",
-    "^\w+\.\w+ AI",
-    "^AI News Research",
-    "^[A-Z][a-z]+ [A-Z][a-z]+ (and|with|for)",
-    "✅.*✅"
-)
-foreach ($session in $sessions) {
-    $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($session.FilePath)
-    if (-not $titleCache.ContainsKey($sessionId)) {
-        foreach ($pattern in $badSummaryPatterns) {
-            if ($session.Summary -match $pattern) {
-                $titleCache[$sessionId] = "SKIP"
-                $session.Summary = "SKIP"
-                $cacheUpdated = $true
-                break
-            }
         }
     }
 }

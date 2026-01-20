@@ -9,8 +9,10 @@ A session manager for Claude Code that replaces UUID-based session lists with au
 - Generates descriptive session titles using Claude Sonnet
 - Automatically skips meaningless sessions (greetings, auto-reports)
 - Filters out empty and corrupted sessions
-- Provides the same arrow-key navigation as `/resume`
+- Interactive number-key selection for instant resume
 - Caches titles for fast subsequent launches
+- **NEW**: Early completion strategy for AI processing (30s batches)
+- **NEW**: File read caching to eliminate duplicate I/O
 
 ## Screenshot
 
@@ -24,7 +26,7 @@ Found 105 sessions
    [4] ブログ記事のLLM性能比較内容の拡充
   *[5] My Custom Session Name
 
-[Up/Down] Move  [Enter] Resume  [S] Re-summarize  [N] Name  [Q] Quit
+Select a session to resume (1-15), or press Enter to cancel:
 ```
 
 ## Installation
@@ -35,8 +37,8 @@ Requires Claude Code CLI.
 
 ```powershell
 # Download files
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tenormusica2024/claude-session-manager/main/session-manager.ps1" -OutFile "$env:USERPROFILE\.claude\session-manager.ps1"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tenormusica2024/claude-session-manager/main/resume-plus.cmd" -OutFile "$env:USERPROFILE\.claude\resume-plus.cmd"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Tenormusica2024/claude-session-manager/master/session-manager-interactive.ps1" -OutFile "$env:USERPROFILE\.claude\session-manager-interactive.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Tenormusica2024/claude-session-manager/master/resume-plus.cmd" -OutFile "$env:USERPROFILE\.claude\resume-plus.cmd"
 
 # Run from any terminal
 resume-plus
@@ -45,19 +47,25 @@ resume-plus
 ### Option 2: Direct PowerShell
 
 ```powershell
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tenormusica2024/claude-session-manager/main/session-manager.ps1" -OutFile "$env:USERPROFILE\.claude\session-manager.ps1"
-& "$env:USERPROFILE\.claude\session-manager.ps1"
+& "$env:USERPROFILE\.claude\session-manager-interactive.ps1"
 ```
+
+### Option 3: Claude Code Skill
+
+Copy `skills/resume-plus/` to your `.claude/skills/` directory:
+
+```powershell
+Copy-Item -Path "claude-session-manager\skills\resume-plus" -Destination "$env:USERPROFILE\.claude\skills\resume-plus" -Recurse
+```
+
+Then use inside Claude Code: `/resume-plus`
 
 ## Controls
 
 | Key | Action |
 |-----|--------|
-| Up/Down | Navigate |
-| Enter | Resume session |
-| S | Re-generate title |
-| N | Set custom name |
-| Q | Quit |
+| 1-15 | Resume session by number |
+| Enter | Cancel |
 
 ## How it works
 
@@ -72,8 +80,14 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/tenormusica2024/claude
 
 | Phase | Time |
 |-------|------|
-| First run (with AI) | ~12 seconds |
-| Subsequent runs | ~2 seconds |
+| First run (with AI) | ~10 seconds (improved with early completion) |
+| Subsequent runs | ~1.5 seconds (file read caching) |
+
+## v2 Improvements
+
+- **Early Completion Strategy**: AI results processed in 30s batches instead of waiting for all jobs
+- **File Read Caching**: Eliminated duplicate file I/O operations
+- **Unified SKIP Logic**: Consolidated pattern matching and line count checks
 
 ## Troubleshooting
 
